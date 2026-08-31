@@ -1,0 +1,16 @@
+The Responses-to-Chat conversion design is informed by codex-deepseek-proxy
+(MIT License, copyright 2026 Codex DeepSeek Proxy Contributors):
+https://github.com/himmetozcan/codex-deepseek-proxy
+
+The implementation in this repository was rewritten for the PCL Tailnet
+gateway, adds model discovery, a dependency-free MCP server, client installers,
+workspace locking, and Codex subprocess delegation.
+
+The unified provider/model routing, Codex-home ownership journal, health
+surface, and dashboard information architecture were also informed by
+OpenCodex (MIT License, copyright 2026 opencodex contributors):
+https://github.com/lidge-jun/opencodex
+
+PCL Relay keeps a narrower personal-Tailnet scope: it does not import or
+manage the user's OpenAI credentials, and PCL execution remains isolated from
+the official GPT main session.

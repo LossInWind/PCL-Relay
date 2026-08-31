@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List
+
+from .client_config import (
+    INSTALL_ROOT,
+    UNSANDBOXED_MARKER,
+    detect_models,
+    discover_relays,
+    discover_models,
+    doctor,
+    install_client_config,
+    install_source_tree,
+    request_json,
+    select_relay,
+    uninstall_client_config,
+)
+from .models import (
+    AGENTS,
+    DEFAULT_GATEWAY_URL,
+    codex_home,
+    configured_agents,
+    load_registry,
+    model_alias,
+    model_catalog,
+    model_details,
+    save_registry,
+)
+from .runner import delegate
+from .remote_clients import (
+    discover_remote_clients,
+    install_remote_client,
+    remote_client_status,
+    check_client_connectivity,
+)
+from .bridges import bridge_status, install_bridge, remove_bridge
+from .direct_clients import install_local_direct
+
+
+SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / "pcl-codex-gateway.service"
+GATEWAY_KEY = Path.home() / ".config" / "pcl-codex-bridge" / "api-key"
+
+
+def emit(value: Any) -> None:
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def run(command: List[str], check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(command, text=True, capture_output=True, check=check)
+
+
+def install_gateway(args: argparse.Namespace) -> Dict[str, Any]:
+    if sys.platform == "darwin":
+        raise RuntimeError("Gateway installation is supported on Ubuntu/Linux, not macOS")
+    install_source_tree()
+    key_source = Path(args.key_file).expanduser() if args.key_file else None
+    if key_source:
+        if not key_source.is_file() or not key_source.stat().st_size:
+            raise RuntimeError(f"API key file is missing or empty: {key_source}")
+        GATEWAY_KEY.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(key_source, GATEWAY_KEY)
+    if not GATEWAY_KEY.is_file() or not GATEWAY_KEY.stat().st_size:
+        raise RuntimeError(f"Install the PCL API key at {GATEWAY_KEY} or pass --key-file")
+    os.chmod(GATEWAY_KEY, 0o600)
+    SYSTEMD_UNIT.parent.mkdir(parents=True, exist_ok=True)
+    standalone = bool(getattr(sys, "frozen", False))
+    exec_start = f"{BIN_PATH} gateway-server" if standalone else f"{sys.executable} -m pcl_codex_bridge.gateway"
+    unit = "\n".join(
+        [
+            "[Unit]",
+            "Description=PCL Codex Tailnet gateway",
+            "After=network-online.target tailscaled.service",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"Environment=PYTHONPATH={INSTALL_ROOT}",
+            f"Environment=PCL_LLM_API_KEY_FILE={GATEWAY_KEY}",
+            f"Environment=PCL_CODEX_GATEWAY_PORT={args.port}",
+            f"ExecStart={exec_start}",
+            "Restart=on-failure",
+            "RestartSec=5",
+            "NoNewPrivileges=true",
+            "PrivateTmp=true",
+            "ProtectSystem=strict",
+            "ProtectHome=read-only",
+            f"ReadOnlyPaths={GATEWAY_KEY}",
+            f"ReadWritePaths={Path.home() / '.local' / 'state' / 'pcl-codex-bridge'}",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+    )
+    SYSTEMD_UNIT.write_text(unit, encoding="utf-8")
+    state = Path.home() / ".local" / "state" / "pcl-codex-bridge"
+    state.mkdir(parents=True, exist_ok=True)
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT.name])
+    run(["systemctl", "--user", "restart", SYSTEMD_UNIT.name])
+    status = run(["systemctl", "--user", "is-active", SYSTEMD_UNIT.name], check=False)
+    return {
+        "installed": str(INSTALL_ROOT),
+        "unit": str(SYSTEMD_UNIT),
+        "key": str(GATEWAY_KEY),
+        "key_mode": oct(GATEWAY_KEY.stat().st_mode & 0o777),
+        "service": status.stdout.strip(),
+    }
+
+
+def uninstall_gateway() -> Dict[str, Any]:
+    run(["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT.name], check=False)
+    removed = []
+    if SYSTEMD_UNIT.exists():
+        SYSTEMD_UNIT.unlink()
+        removed.append(str(SYSTEMD_UNIT))
+    run(["systemctl", "--user", "daemon-reload"], check=False)
+    return {"removed": removed, "key_preserved": str(GATEWAY_KEY)}
+
+
+def install_client(args: argparse.Namespace) -> Dict[str, Any]:
+    install_source_tree()
+    if getattr(args, "allow_unsandboxed_fallback", False):
+        UNSANDBOXED_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        UNSANDBOXED_MARKER.write_text(
+            "Explicit opt-in for Linux hosts where the Codex bwrap sandbox is unavailable.\n",
+            encoding="utf-8",
+        )
+        os.chmod(UNSANDBOXED_MARKER, 0o600)
+    registry = load_registry()
+    registry["gateway"] = args.gateway_url
+    registry.setdefault("models", {})
+    save_registry(registry)
+    result = install_client_config(args.gateway_url)
+    result["install_root"] = str(INSTALL_ROOT)
+    result["main_provider_preserved"] = True
+    result["unsandboxed_fallback"] = UNSANDBOXED_MARKER.exists()
+    return result
+
+
+def select_models(values: List[str]) -> Dict[str, Any]:
+    registry = load_registry()
+    available = registry.get("available_models") if isinstance(registry, dict) else None
+    available = available if isinstance(available, dict) else {}
+    existing = registry.get("agent_definitions") if isinstance(registry, dict) else None
+    existing = existing if isinstance(existing, dict) else dict(AGENTS)
+    requested = values or list(AGENTS)
+    definitions: Dict[str, Dict[str, str]] = {}
+    selected: List[str] = []
+    unknown: List[str] = []
+
+    for value in requested:
+        alias = value if value in existing or value in AGENTS else ""
+        model_id = ""
+        record: Dict[str, Any] = {}
+        if alias:
+            info = existing.get(alias) or AGENTS.get(alias) or {}
+            model_id = str(info.get("model") or "")
+            raw_record = available.get(model_id)
+            record = raw_record if isinstance(raw_record, dict) else model_details(model_id)
+        elif value in available and isinstance(available[value], dict):
+            record = available[value]
+            if not record.get("agent_eligible", False):
+                raise RuntimeError(f"Model cannot be used as a Codex text agent: {value}")
+            model_id = value
+            alias = str(record.get("alias") or model_alias(model_id))
+        else:
+            unknown.append(value)
+            continue
+        if not model_id:
+            unknown.append(value)
+            continue
+        if alias not in selected:
+            selected.append(alias)
+        definitions[alias] = {
+            "model": model_id,
+            "description": str(
+                record.get("description")
+                or (existing.get(alias) or AGENTS.get(alias) or {}).get("description")
+                or model_details(model_id)["description"]
+            ),
+        }
+
+    if unknown:
+        raise RuntimeError(
+            "Unknown agent aliases or model IDs (run `pcl-codex models discover` first): "
+            + ", ".join(unknown)
+        )
+    if not selected:
+        raise RuntimeError("Select at least one PCL text model")
+    registry["selected_agents"] = selected
+    registry["agent_definitions"] = definitions
+    save_registry(registry)
+    catalog = codex_home() / "pcl-models.json"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(json.dumps(model_catalog(definitions), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "selected_agents": selected,
+        "models": {name: definitions[name]["model"] for name in selected},
+        "catalog": str(catalog),
+        "codex_reload_required": True,
+    }
+
+
+def admin_root(gateway_url: str) -> str:
+    return gateway_url.rstrip("/").rsplit("/v1", 1)[0]
+
+
+def server_status(gateway_url: str) -> Dict[str, Any]:
+    return request_json(admin_root(gateway_url) + "/admin/status", timeout=15)
+
+
+def server_logs(gateway_url: str) -> Dict[str, Any]:
+    return request_json(admin_root(gateway_url) + "/admin/logs", timeout=15)
+
+
+def server_restart(gateway_url: str) -> Dict[str, Any]:
+    before = server_status(gateway_url)
+    old_pid = before.get("pid") if isinstance(before, dict) else None
+    accepted = request_json(admin_root(gateway_url) + "/admin/restart", {}, timeout=15)
+    deadline = time.monotonic() + 30
+    last_error = ""
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        try:
+            current = server_status(gateway_url)
+            if current.get("status") == "active" and current.get("pid") != old_pid:
+                return {
+                    "accepted": accepted,
+                    "before_pid": old_pid,
+                    "status": current,
+                }
+        except Exception as exc:
+            last_error = str(exc)
+    raise RuntimeError(f"Gateway did not return with a new process within 30 seconds: {last_error}")
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(prog="pcl-codex")
+    root.add_argument("--gateway-url", default=None)
+    commands = root.add_subparsers(dest="command", required=True)
+
+    install = commands.add_parser("install")
+    targets = install.add_subparsers(dest="target", required=True)
+    client = targets.add_parser("client")
+    client.add_argument(
+        "--allow-unsandboxed-fallback",
+        action="store_true",
+        help="On Linux only, allow danger-full-access when the bwrap workspace sandbox cannot start.",
+    )
+    client.set_defaults(handler=install_client)
+    gateway = targets.add_parser("gateway")
+    gateway.add_argument("--key-file")
+    gateway.add_argument("--port", type=int, default=15722)
+    gateway.set_defaults(handler=install_gateway)
+
+    models = commands.add_parser("models")
+    actions = models.add_subparsers(dest="models_action", required=True)
+    detect = actions.add_parser("detect")
+    detect.add_argument("--timeout", type=int, default=120)
+    detect.set_defaults(handler=lambda a: detect_models(a.gateway_url, a.timeout))
+    discover = actions.add_parser("discover")
+    discover.set_defaults(handler=lambda a: discover_models(a.gateway_url))
+    select = actions.add_parser("select")
+    select.add_argument("agents", nargs="*")
+    select.set_defaults(handler=lambda a: select_models(a.agents))
+    show = actions.add_parser("show")
+    show.set_defaults(handler=lambda a: load_registry())
+
+    diagnosis = commands.add_parser("doctor")
+    diagnosis.set_defaults(handler=lambda a: doctor(a.gateway_url))
+
+    server = commands.add_parser("server")
+    server_actions = server.add_subparsers(dest="server_action", required=True)
+    status = server_actions.add_parser("status")
+    status.set_defaults(handler=lambda a: server_status(a.gateway_url))
+    logs = server_actions.add_parser("logs")
+    logs.set_defaults(handler=lambda a: server_logs(a.gateway_url))
+    restart = server_actions.add_parser("restart")
+    restart.set_defaults(handler=lambda a: server_restart(a.gateway_url))
+
+    relays = commands.add_parser("relays")
+    relay_actions = relays.add_subparsers(dest="relays_action", required=True)
+    relay_discover = relay_actions.add_parser("discover")
+    relay_discover.add_argument("--port", type=int, default=15722)
+    relay_discover.add_argument("--timeout", type=float, default=2.0)
+    relay_discover.set_defaults(handler=lambda a: discover_relays(a.port, a.timeout))
+    relay_select = relay_actions.add_parser("select")
+    relay_select.add_argument("url")
+    relay_select.set_defaults(handler=lambda a: select_relay(a.url))
+
+    clients = commands.add_parser("clients")
+    client_actions = clients.add_subparsers(dest="clients_action", required=True)
+    client_discover = client_actions.add_parser("discover")
+    client_discover.add_argument("--timeout", type=float, default=2.0)
+    client_discover.set_defaults(handler=lambda a: discover_remote_clients(a.timeout))
+    client_status = client_actions.add_parser("status")
+    client_status.add_argument("ssh_target")
+    client_status.set_defaults(handler=lambda a: remote_client_status(a.ssh_target, a.gateway_url))
+    client_test = client_actions.add_parser("test")
+    client_test.add_argument("ssh_target")
+    client_test.add_argument("--node", default="")
+    client_test.add_argument("--quick", action="store_true")
+    client_test.set_defaults(
+        handler=lambda a: check_client_connectivity(
+            a.ssh_target,
+            a.gateway_url,
+            node_id=a.node,
+            deep=not a.quick,
+        )
+    )
+    client_install = client_actions.add_parser("install")
+    client_install.add_argument("ssh_target")
+    client_install.set_defaults(handler=lambda a: install_remote_client(a.ssh_target, a.gateway_url))
+
+    bridges = commands.add_parser("bridges")
+    bridge_actions = bridges.add_subparsers(dest="bridges_action", required=True)
+    bridge_show = bridge_actions.add_parser("show")
+    bridge_show.set_defaults(handler=lambda a: bridge_status())
+    bridge_install = bridge_actions.add_parser("install")
+    bridge_install.add_argument("ssh_target")
+    bridge_install.add_argument("--remote-port", type=int, default=0)
+    bridge_install.set_defaults(handler=lambda a: install_bridge(a.ssh_target, a.remote_port))
+    bridge_remove = bridge_actions.add_parser("remove")
+    bridge_remove.add_argument("ssh_target")
+    bridge_remove.set_defaults(handler=lambda a: remove_bridge(a.ssh_target))
+
+    direct = commands.add_parser("direct")
+    direct_actions = direct.add_subparsers(dest="direct_action", required=True)
+    direct_install = direct_actions.add_parser("install")
+    direct_install.add_argument("ssh_target")
+    direct_install.set_defaults(handler=lambda a: install_local_direct(a.ssh_target))
+
+    delegated = commands.add_parser("delegate")
+    delegated.add_argument("agent", choices=list(configured_agents()))
+    delegated.add_argument("task")
+    delegated.add_argument("--workspace", default=os.getcwd())
+    delegated.add_argument("--timeout", type=int, default=1800)
+    delegated.add_argument("--execution-mode", choices=["read-only", "workspace-write"], default="workspace-write")
+    delegated.set_defaults(
+        handler=lambda a: delegate(a.agent, a.task, a.workspace, a.timeout, a.execution_mode)
+    )
+
+    uninstall = commands.add_parser("uninstall")
+    uninstall.add_argument("--gateway", action="store_true")
+    uninstall.set_defaults(
+        handler=lambda a: uninstall_gateway() if a.gateway else uninstall_client_config()
+    )
+    return root
+
+
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "mcp-server":
+        from .mcp_server import main as mcp_main
+
+        mcp_main()
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "gateway-server":
+        from .gateway import main as gateway_main
+
+        gateway_main()
+        return
+    args = parser().parse_args()
+    if args.gateway_url is None:
+        registry = load_registry()
+        args.gateway_url = str(registry.get("gateway") or DEFAULT_GATEWAY_URL)
+    try:
+        emit(args.handler(args))
+    except Exception as exc:
+        emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,20 @@
+.DS_Store
+.build/
+macos/.build/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.zip
+*.log
+*.pid
+*.backup-*
+
+# Local credentials and runtime state must never enter the public repository.
+auth.json
+api-key
+*.key
+*.pem
+.env
+.env.*

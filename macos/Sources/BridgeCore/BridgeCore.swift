@@ -91,6 +91,33 @@ public struct RelayServerLogs: Codable, Equatable, Sendable {
     public let lines: [String]
 }
 
+public struct PortalStatus: Codable, Equatable, Sendable {
+    public let available: Bool
+    public let portalURL: String
+    public let proxyURL: String
+    public let pacURL: String
+    public let latencyMS: Int
+    public let httpStatus: Int?
+    public let contentType: String?
+    public let error: String
+    public let opened: Bool?
+    public let browser: String?
+    public let target: String?
+    public let profile: String?
+    public let systemProxyChanged: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case available, error, opened, browser, target, profile
+        case portalURL = "portal_url"
+        case proxyURL = "proxy_url"
+        case pacURL = "pac_url"
+        case latencyMS = "latency_ms"
+        case httpStatus = "http_status"
+        case contentType = "content_type"
+        case systemProxyChanged = "system_proxy_changed"
+    }
+}
+
 public struct RemoteClientStatus: Codable, Equatable, Sendable {
     public let ssh: Bool
     public let sshTarget: String?

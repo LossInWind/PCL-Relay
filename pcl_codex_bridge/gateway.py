@@ -7,12 +7,15 @@ import json
 import ipaddress
 import os
 import re
+import select
+import socket
 import subprocess
 import sys
 import time
 import threading
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +41,8 @@ LOG_PATH = Path(
 ).expanduser()
 STARTED_AT = time.time()
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
+PORTAL_URL = "https://llmapi.pcl.ac.cn"
+PORTAL_DOMAIN = "pcl.ac.cn"
 
 
 def log(message: str) -> None:
@@ -99,8 +104,24 @@ def gateway_status() -> Dict[str, Any]:
         "pid": os.getpid(),
         "uptime_seconds": max(0, int(time.time() - STARTED_AT)),
         "upstream": UPSTREAM_BASE,
-        "admin_scope": ["status", "logs", "restart_self"],
+        "admin_scope": ["status", "logs", "restart_self", "portal_proxy"],
     }
+
+
+def portal_target_allowed(host: str, port: int) -> bool:
+    normalized = host.lower().rstrip(".")
+    return port == 443 and (normalized == PORTAL_DOMAIN or normalized.endswith("." + PORTAL_DOMAIN))
+
+
+def portal_pac(proxy_host: str, proxy_port: int = PORT) -> str:
+    safe_host = proxy_host.replace("\\", "").replace('"', "")
+    return (
+        "function FindProxyForURL(url, host) {\n"
+        f'  if (dnsDomainIs(host, ".{PORTAL_DOMAIN}") || host === "{PORTAL_DOMAIN}") '
+        f'return "PROXY {safe_host}:{int(proxy_port)}";\n'
+        '  return "DIRECT";\n'
+        "}\n"
+    )
 
 
 def recent_logs(limit: int = 100) -> List[str]:
@@ -399,6 +420,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _raw(self, status: int, raw: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(raw)
+
     def _admin_allowed(self) -> bool:
         try:
             return ipaddress.ip_address(self.client_address[0]) in TAILNET_V4
@@ -406,6 +436,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return False
 
     def do_GET(self) -> None:
+        if self.path.startswith("http://"):
+            self._proxy_portal_http()
+            return
         path = self.path.split("?", 1)[0].rstrip("/")
         if path in {"/health", "/healthz", "/v1/healthz"}:
             self._json(
@@ -430,10 +463,83 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             self._json(200, {"service": "pcl-codex-gateway", "lines": recent_logs(100)})
             return
+        if path == "/admin/portal.pac":
+            if not self._admin_allowed():
+                self._json(403, {"error": "tailnet_only"})
+                return
+            proxy_host = str(self.server.server_address[0])
+            self._raw(
+                200,
+                portal_pac(proxy_host).encode("utf-8"),
+                "application/x-ns-proxy-autoconfig; charset=utf-8",
+            )
+            return
         if path == "/v1/models":
             self._proxy_simple("/models")
             return
         self._json(404, {"error": "not_found"})
+
+    def do_CONNECT(self) -> None:
+        if not self._admin_allowed():
+            self._json(403, {"error": "tailnet_only"})
+            return
+        host, separator, raw_port = self.path.rpartition(":")
+        try:
+            port = int(raw_port) if separator else 443
+        except ValueError:
+            port = 0
+        if not host or not portal_target_allowed(host, port):
+            self._json(403, {"error": "portal_domain_only"})
+            return
+        upstream: Optional[socket.socket] = None
+        try:
+            upstream = socket.create_connection((host, port), timeout=15)
+            self.send_response(200, "Connection Established")
+            self.send_header("Proxy-Agent", "pcl-codex-gateway")
+            self.end_headers()
+            self.wfile.flush()
+            self.close_connection = True
+            sockets = [self.connection, upstream]
+            while True:
+                readable, _, exceptional = select.select(sockets, [], sockets, 60)
+                if exceptional or not readable:
+                    break
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    destination = upstream if source is self.connection else self.connection
+                    destination.sendall(data)
+        except OSError as exc:
+            log(f"portal proxy failure host={host} error={type(exc).__name__}: {exc}")
+            if upstream is None:
+                self._json(502, {"error": "portal_unreachable"})
+        finally:
+            if upstream is not None:
+                upstream.close()
+
+    def _proxy_portal_http(self) -> None:
+        try:
+            parsed = urllib.parse.urlsplit(self.path)
+            if (
+                parsed.scheme != "http"
+                or parsed.port not in {None, 80}
+                or not portal_target_allowed(parsed.hostname or "", 443)
+            ):
+                self._json(403, {"error": "portal_domain_only"})
+                return
+            request = urllib.request.Request(
+                self.path,
+                headers={"User-Agent": self.headers.get("User-Agent", "PCL-Relay/1.2")},
+            )
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=30) as response:
+                raw = response.read()
+                self._raw(response.status, raw, response.headers.get("Content-Type", "application/octet-stream"))
+        except urllib.error.HTTPError as exc:
+            self._json(exc.code, {"error": "portal_upstream_error"})
+        except Exception as exc:
+            self._json(502, {"error": "portal_gateway_error", "detail": str(exc)})
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/")

@@ -60,6 +60,7 @@ final class AppModel: ObservableObject {
     @Published var doctor: DoctorStatus?
     @Published var registry: ModelRegistry?
     @Published var serverStatus: RelayServerStatus?
+    @Published var portalStatus: PortalStatus?
     @Published var relayDiscovery: RelayDiscovery?
     @Published var selectedAgents = Set(AgentDefinition.all.map(\.id))
     @Published var remoteServiceActive = false
@@ -73,6 +74,8 @@ final class AppModel: ObservableObject {
     @Published var isSavingAgents = false
     @Published var isRunningAgent = false
     @Published var isRestartingGateway = false
+    @Published var isCheckingPortal = false
+    @Published var isOpeningPortal = false
     @Published var isDiscoveringNodes = false
     @Published var isSelectingRelay = false
     @Published var installingClientTarget: String?
@@ -176,6 +179,7 @@ final class AppModel: ObservableObject {
                 remoteStatusText = remoteServiceActive ? "已通过 Tailnet 健康检查" : (doctor?.gatewayError ?? "中转站不可达")
                 Task { await refreshRemoteStatus() }
                 Task { await discoverNodes(showBanner: false) }
+                Task { await refreshPortalStatus(showBanner: false) }
             } catch {
                 show("刷新失败：\(error.localizedDescription)", .error)
             }
@@ -321,6 +325,49 @@ final class AppModel: ObservableObject {
 
     func refreshServerStatus() {
         Task { await refreshRemoteStatus() }
+    }
+
+    func refreshPortal() {
+        Task { await refreshPortalStatus(showBanner: true) }
+    }
+
+    private func refreshPortalStatus(showBanner: Bool) async {
+        guard !isCheckingPortal else { return }
+        isCheckingPortal = true
+        defer { isCheckingPortal = false }
+        do {
+            let result = try await runCLI(["portal", "status"])
+            guard result.exitCode == 0 else { throw commandError(result) }
+            let decoded = try BridgeDecode.value(PortalStatus.self, from: result.stdout)
+            portalStatus = decoded
+            if showBanner {
+                show(
+                    decoded.available
+                        ? "PCL 内网页面可用，延迟 \(decoded.latencyMS) ms"
+                        : "PCL 内网页面暂不可用：\(decoded.error)",
+                    decoded.available ? .success : .error
+                )
+            }
+        } catch {
+            if showBanner { show("门户检测失败：\(error.localizedDescription)", .error) }
+        }
+    }
+
+    func openPortal(path: String) {
+        guard !isOpeningPortal else { return }
+        isOpeningPortal = true
+        Task {
+            defer { isOpeningPortal = false }
+            do {
+                let result = try await runCLI(["portal", "open", "--path", path])
+                guard result.exitCode == 0 else { throw commandError(result) }
+                let decoded = try BridgeDecode.value(PortalStatus.self, from: result.stdout)
+                portalStatus = decoded
+                show("已通过 \(decoded.browser ?? "浏览器") 打开 PCL 内网页面", .success)
+            } catch {
+                show("打开失败：\(error.localizedDescription)", .error)
+            }
+        }
     }
 
     func refreshTailnetNodes() {

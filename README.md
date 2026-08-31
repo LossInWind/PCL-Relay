@@ -27,11 +27,12 @@ PCL 门户登录只用于创建和管理该 Key；日常调用不需要客户端
 
 ## 可视化应用
 
-macOS 提供原生的 **PCL Relay** 应用，包含三个核心页面：
+macOS 提供原生的 **PCL Relay** 应用，包含四个核心页面：
 
 - **拓扑配置**：拖动 Tailnet 设备、点击连线，查看每台设备能否作为中转站、直连当前中转站、直接访问 PCL API 或经 Mac 桥接；可载入最简单稳定的自动推荐，一键应用后重新检测。
 - **中转站**：自动枚举 Tailnet 节点，识别已部署网关、验证 PCL API Key 与模型目录，并手动选择当前中转站。选择是粘性的，任务执行中不会自动故障切换。
 - **中转站页中的远端 Codex**：识别 `~/.ssh/config` 中与 Tailnet 节点对应的 macOS/Linux 主机，检查远端系统、Codex 配置和中转站可达性，并一键选择 Tailnet 直连、PCL 本地直连或桥接。Windows 不在支持范围内。
+- **PCL 门户**：在独立的本机浏览器资料中打开 PCL API 广场、用量/钱包和 API Key 页面。只有 `*.pcl.ac.cn` 经当前 Tailnet 中转站转发，不修改 macOS 全局代理，也不读取日常浏览器 Cookie。
 - **子 Agent**：从可用文本模型中选择允许官方 GPT 调用的 PCL 模型，安装/修复 Codex 注册，并直接运行工作区任务。Embedding、重排序、语音、OCR 和图像模型会展示但不会误开放成代码 Agent。
 
 中转站页和拓扑页共享同一份设备、所选中转站、规划路线和连通性结果。每台设备均可
@@ -101,6 +102,8 @@ GPT 委派时会把当前 Codex/VS Code 工作区直接传给子 Agent；App 里
 - `pcl-codex relays select <gateway-url>`：选择中转站并只更新本工具管理的 Codex 配置区块。
 - `pcl-codex clients discover`：读取本机 SSH 配置并检查其他 macOS/Linux Codex 主机。
 - `pcl-codex clients install <ssh-alias>`：通过现有 SSH 公钥在远端用户目录一键接入当前中转站。
+- `pcl-codex portal status`：验证当前中转站能否转发 PCL 内网页面。
+- `pcl-codex portal open --path /wallet`：使用独立浏览器资料打开 PCL 门户；支持 `/`、`/wallet`、`/keys`、`/playground` 和 `/models`。
 - `pcl-codex direct install <ssh-alias>`：对能直接访问 PCL API、但不能安全充当 Tailnet 中转站的主机安装回环适配器。
 - `pcl-codex bridges install <ssh-alias>`：仅在直连方案都不可用时建立独立的 Mac SSH 回环桥接。
 - `pcl-codex models discover`：从网关读取最新模型目录，不发送推理请求。
@@ -114,6 +117,7 @@ GPT 委派时会把当前 Codex/VS Code 工作区直接传给子 Agent；App 里
 ## 安全和冲突控制
 
 - 网关只绑定 Tailscale IPv4；无法获取 Tailscale IP 时拒绝启动。
+- 浏览器代理只接受 Tailnet 来源，并仅允许到 `pcl.ac.cn` 及其子域的 HTTPS CONNECT；它不是通用代理。
 - 执行代理默认使用 `workspace-write` 沙箱和 `approval_policy=never`。
 - 同一工作区的写任务通过文件锁串行执行。
 - 执行结果带回 Git 修改前后状态、diff、测试摘要和错误尾部。

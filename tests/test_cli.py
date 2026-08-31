@@ -4,10 +4,20 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pcl_codex_bridge.cli import select_models
+from pcl_codex_bridge.cli import portal_status, select_models
 
 
 class CliTests(unittest.TestCase):
+    def test_portal_status_uses_selected_gateway_as_https_proxy(self):
+        completed = mock.MagicMock(returncode=0, stdout="200\ntext/html; charset=utf-8\n0.082", stderr="")
+        with mock.patch("pcl_codex_bridge.cli.subprocess.run", return_value=completed) as run:
+            result = portal_status("http://relay.tail.test:15722/v1")
+        self.assertTrue(result["available"])
+        self.assertEqual(result["proxy_url"], "http://relay.tail.test:15722")
+        self.assertEqual(result["pac_url"], "http://relay.tail.test:15722/admin/portal.pac")
+        self.assertIn("http://relay.tail.test:15722", run.call_args.args[0])
+        self.assertIn("--noproxy", run.call_args.args[0])
+
     def test_select_accepts_discovered_model_id_and_writes_catalog(self):
         registry = {
             "available_models": {

@@ -1,6 +1,6 @@
 [project]
 name = "pcl-codex-bridge"
-version = "0.1.0"
+version = "1.2.0"
 description = "Tailnet-only PCL model gateway and Codex execution agents"
 requires-python = ">=3.9"
 license = {text = "MIT"}

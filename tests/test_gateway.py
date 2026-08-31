@@ -8,6 +8,8 @@ from pcl_codex_bridge.gateway import (
     build_chat_request,
     gateway_status,
     parse_fallback_calls,
+    portal_pac,
+    portal_target_allowed,
     recent_logs,
     responses_messages,
 )
@@ -87,8 +89,21 @@ class GatewayMappingTests(unittest.TestCase):
             status = gateway_status()
         self.assertEqual(status["node_name"], "haichen-pcl-linux-3070ti")
         self.assertEqual(status["pid"], 42)
-        self.assertEqual(status["admin_scope"], ["status", "logs", "restart_self"])
+        self.assertEqual(status["admin_scope"], ["status", "logs", "restart_self", "portal_proxy"])
         self.assertNotIn("key_file", status)
+
+    def test_portal_proxy_only_allows_pcl_https_domains(self):
+        self.assertTrue(portal_target_allowed("llmapi.pcl.ac.cn", 443))
+        self.assertTrue(portal_target_allowed("login.pcl.ac.cn", 443))
+        self.assertFalse(portal_target_allowed("example.com", 443))
+        self.assertFalse(portal_target_allowed("pcl.ac.cn.example.com", 443))
+        self.assertFalse(portal_target_allowed("llmapi.pcl.ac.cn", 80))
+
+    def test_portal_pac_routes_only_pcl_domains(self):
+        pac = portal_pac("relay.tail.test", 15722)
+        self.assertIn('PROXY relay.tail.test:15722', pac)
+        self.assertIn('.pcl.ac.cn', pac)
+        self.assertIn('return "DIRECT"', pac)
 
     def test_recent_logs_redacts_key_file_path(self):
         with tempfile.TemporaryDirectory() as temp:

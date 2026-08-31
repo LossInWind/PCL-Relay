@@ -47,4 +47,12 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(result.route, "local_pcl_direct")
         XCTAssertTrue(result.checks.first?.passed == true)
     }
+
+    func testDecodesPortalForwardingStatus() throws {
+        let json = #"{"available":true,"portal_url":"https://llmapi.pcl.ac.cn","proxy_url":"http://relay:15722","pac_url":"http://relay:15722/admin/portal.pac","latency_ms":82,"http_status":200,"content_type":"text/html","error":"","system_proxy_changed":false}"#
+        let status = try BridgeDecode.value(PortalStatus.self, from: json)
+        XCTAssertTrue(status.available)
+        XCTAssertEqual(status.latencyMS, 82)
+        XCTAssertFalse(status.systemProxyChanged ?? true)
+    }
 }

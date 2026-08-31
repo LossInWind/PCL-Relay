@@ -48,6 +48,7 @@ from .direct_clients import install_local_direct
 
 SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / "pcl-codex-gateway.service"
 GATEWAY_KEY = Path.home() / ".config" / "pcl-codex-bridge" / "api-key"
+PORTAL_URL = "https://llmapi.pcl.ac.cn"
 
 
 def emit(value: Any) -> None:
@@ -244,6 +245,105 @@ def server_restart(gateway_url: str) -> Dict[str, Any]:
     raise RuntimeError(f"Gateway did not return with a new process within 30 seconds: {last_error}")
 
 
+def portal_status(gateway_url: str) -> Dict[str, Any]:
+    proxy_url = admin_root(gateway_url)
+    started = time.monotonic()
+    try:
+        probe = subprocess.run(
+            [
+                "curl",
+                "--noproxy",
+                "",
+                "--proxy",
+                proxy_url,
+                "--silent",
+                "--show-error",
+                "--location",
+                "--max-time",
+                "20",
+                "--output",
+                "/dev/null",
+                "--write-out",
+                "%{http_code}\n%{content_type}\n%{time_total}",
+                PORTAL_URL + "/",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+        )
+        if probe.returncode != 0:
+            raise RuntimeError(probe.stderr.strip() or f"curl exited {probe.returncode}")
+        lines = probe.stdout.splitlines()
+        status = int(lines[0])
+        content_type = lines[1] if len(lines) > 1 else ""
+    except Exception as exc:
+        return {
+            "available": False,
+            "portal_url": PORTAL_URL,
+            "proxy_url": proxy_url,
+            "pac_url": proxy_url + "/admin/portal.pac",
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    available = status == 200 and "text/html" in content_type.lower()
+    return {
+        "available": available,
+        "portal_url": PORTAL_URL,
+        "proxy_url": proxy_url,
+        "pac_url": proxy_url + "/admin/portal.pac",
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "http_status": status,
+        "content_type": content_type,
+        "error": "" if available else "PCL portal did not return an HTML page",
+    }
+
+
+def portal_open(gateway_url: str, path: str = "/") -> Dict[str, Any]:
+    if sys.platform != "darwin":
+        raise RuntimeError("Opening the PCL portal is currently supported on macOS")
+    allowed_paths = {"/", "/keys", "/wallet", "/playground", "/models"}
+    if path not in allowed_paths:
+        raise RuntimeError(f"Unsupported PCL portal path: {path}")
+    status = portal_status(gateway_url)
+    if not status.get("available"):
+        raise RuntimeError("PCL portal forwarding is unavailable: " + str(status.get("error") or "unknown"))
+    browser = next(
+        (
+            name
+            for name in ["Google Chrome", "Microsoft Edge", "Brave Browser", "Chromium"]
+            if Path(f"/Applications/{name}.app").exists()
+        ),
+        "",
+    )
+    if not browser:
+        raise RuntimeError("Install Google Chrome, Microsoft Edge, Brave, or Chromium to use the isolated portal browser")
+    profile = Path.home() / "Library" / "Application Support" / "PCL Relay" / "Portal Browser"
+    profile.mkdir(parents=True, exist_ok=True)
+    target = PORTAL_URL + path
+    command = [
+        "open",
+        "-na",
+        browser,
+        "--args",
+        f"--user-data-dir={profile}",
+        f"--proxy-pac-url={status['pac_url']}",
+        "--no-first-run",
+        target,
+    ]
+    launched = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+    if launched.returncode != 0:
+        raise RuntimeError(launched.stderr.strip() or "Could not launch the portal browser")
+    return {
+        **status,
+        "opened": True,
+        "browser": browser,
+        "target": target,
+        "profile": str(profile),
+        "system_proxy_changed": False,
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="pcl-codex")
     root.add_argument("--gateway-url", default=None)
@@ -287,6 +387,14 @@ def parser() -> argparse.ArgumentParser:
     logs.set_defaults(handler=lambda a: server_logs(a.gateway_url))
     restart = server_actions.add_parser("restart")
     restart.set_defaults(handler=lambda a: server_restart(a.gateway_url))
+
+    portal = commands.add_parser("portal")
+    portal_actions = portal.add_subparsers(dest="portal_action", required=True)
+    portal_check = portal_actions.add_parser("status")
+    portal_check.set_defaults(handler=lambda a: portal_status(a.gateway_url))
+    portal_launch = portal_actions.add_parser("open")
+    portal_launch.add_argument("--path", default="/")
+    portal_launch.set_defaults(handler=lambda a: portal_open(a.gateway_url, a.path))
 
     relays = commands.add_parser("relays")
     relay_actions = relays.add_subparsers(dest="relays_action", required=True)

@@ -9,6 +9,7 @@ from pcl_codex_bridge.client_config import (
     BEGIN,
     END,
     INSTALL_ROOT,
+    find_tailscale,
     install_client_config,
     install_source_tree,
     managed_block,
@@ -19,6 +20,29 @@ from pcl_codex_bridge.models import AGENTS, model_catalog
 
 
 class ClientConfigTests(unittest.TestCase):
+    def test_finds_tailscale_outside_gui_app_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            executable = Path(temp) / "Tailscale"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            with (
+                mock.patch.dict(os.environ, {"PCL_TAILSCALE_BIN": ""}, clear=False),
+                mock.patch("pcl_codex_bridge.client_config.shutil.which", return_value=None),
+                mock.patch("pcl_codex_bridge.client_config.TAILSCALE_CANDIDATES", (executable,)),
+            ):
+                self.assertEqual(find_tailscale(), str(executable))
+
+    def test_tailscale_override_has_priority(self):
+        with tempfile.TemporaryDirectory() as temp:
+            executable = Path(temp) / "tailscale-custom"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            with (
+                mock.patch.dict(os.environ, {"PCL_TAILSCALE_BIN": str(executable)}),
+                mock.patch("pcl_codex_bridge.client_config.shutil.which", return_value="/bin/false"),
+            ):
+                self.assertEqual(find_tailscale(), str(executable))
+
     def test_installed_source_tree_can_reinstall_itself(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp)

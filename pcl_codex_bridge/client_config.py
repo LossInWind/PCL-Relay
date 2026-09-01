@@ -32,6 +32,13 @@ END = "# <<< pcl-codex-bridge managed block <<<"
 INSTALL_ROOT = Path.home() / ".local" / "share" / "pcl-codex-bridge"
 BIN_PATH = Path.home() / ".local" / "bin" / "pcl-codex"
 UNSANDBOXED_MARKER = Path.home() / ".config" / "pcl-codex-bridge" / "allow-unsandboxed-fallback"
+TAILSCALE_CANDIDATES = (
+    Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+    Path.home() / "Applications" / "Tailscale.app" / "Contents" / "MacOS" / "Tailscale",
+    Path("/opt/homebrew/bin/tailscale"),
+    Path("/usr/local/bin/tailscale"),
+    Path("/usr/bin/tailscale"),
+)
 
 
 def gateway_root(url: str = DEFAULT_GATEWAY_URL) -> str:
@@ -207,10 +214,35 @@ def request_json(url: str, body: Optional[Dict[str, Any]] = None, timeout: int =
         return json.loads(response.read().decode("utf-8"))
 
 
+def find_tailscale() -> Optional[str]:
+    """Locate the Tailscale CLI even when a macOS app has a minimal PATH."""
+    candidates: List[Path] = []
+    override = os.environ.get("PCL_TAILSCALE_BIN", "").strip()
+    if override:
+        candidates.append(Path(override).expanduser())
+    found = shutil.which("tailscale")
+    if found:
+        candidates.append(Path(found))
+    candidates.extend(TAILSCALE_CANDIDATES)
+
+    seen = set()
+    for candidate in candidates:
+        path = str(candidate)
+        if path in seen:
+            continue
+        seen.add(path)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return path
+    return None
+
+
 def _tailscale_status() -> Dict[str, Any]:
-    executable = shutil.which("tailscale")
+    executable = find_tailscale()
     if not executable:
-        raise RuntimeError("Tailscale CLI is not installed")
+        raise RuntimeError(
+            "Tailscale CLI is not installed or could not be found; "
+            "install Tailscale.app or set PCL_TAILSCALE_BIN"
+        )
     result = subprocess.run(
         [executable, "status", "--json"],
         capture_output=True,
@@ -640,7 +672,7 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
     config = home / "config.toml"
     result: Dict[str, Any] = {
         "gateway": False,
-        "tailscale": bool(shutil.which("tailscale")),
+        "tailscale": bool(find_tailscale()),
         "codex": bool(find_codex()),
         "config_managed": False,
         "profile": (home / "pcl-agent.config.toml").exists(),

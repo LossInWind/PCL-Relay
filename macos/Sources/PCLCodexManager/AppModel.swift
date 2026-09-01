@@ -78,6 +78,11 @@ final class AppModel: ObservableObject {
     @Published var isOpeningPortal = false
     @Published var isDiscoveringNodes = false
     @Published var isSelectingRelay = false
+    @Published var releaseUpdate: ReleaseUpdateStatus?
+    @Published var isCheckingAppUpdate = false
+    @Published var isInstallingAppUpdate = false
+    @Published var appRestartRequired = false
+    @Published var isUpdatingAllClients = false
     @Published var installingClientTarget: String?
     @Published var isApplyingTopology = false
     @Published var topologyRoutes: [String: String] = [:]
@@ -109,6 +114,25 @@ final class AppModel: ObservableObject {
 
     var tailnetNodes: [RelayCandidate] {
         relayDiscovery?.nodes ?? []
+    }
+
+    var manageableRemoteClients: [RelayCandidate] {
+        tailnetNodes.filter {
+            !$0.isSelf
+                && $0.online
+                && $0.clientStatus?.ssh == true
+                && !($0.sshTarget ?? "").isEmpty
+                && $0.clientStatus?.supportedSystem != false
+                && $0.feasibility?.recommendedRoute != "unavailable"
+        }
+    }
+
+    var remoteUpdateCandidates: [RelayCandidate] {
+        manageableRemoteClients.filter {
+            $0.clientStatus?.updateAvailable == true
+                || $0.clientStatus?.nativeV2 != true
+                || $0.clientStatus?.nativeRoles != true
+        }
     }
 
     var codexIntegrationReady: Bool {
@@ -157,8 +181,8 @@ final class AppModel: ObservableObject {
     }
 
     private var cliURL: URL? {
-        if FileManager.default.isExecutableFile(atPath: installedCLIURL.path) { return installedCLIURL }
         if let bundledCLIURL, FileManager.default.isExecutableFile(atPath: bundledCLIURL.path) { return bundledCLIURL }
+        if FileManager.default.isExecutableFile(atPath: installedCLIURL.path) { return installedCLIURL }
         return nil
     }
 
@@ -184,10 +208,64 @@ final class AppModel: ObservableObject {
                 Task { await refreshRemoteStatus() }
                 Task { await discoverNodes(showBanner: false) }
                 Task { await refreshPortalStatus(showBanner: false) }
+                Task { await checkAppUpdate(showBanner: false) }
             } catch {
                 show("刷新失败：\(error.localizedDescription)", .error)
             }
         }
+    }
+
+    func refreshAppUpdate() {
+        Task { await checkAppUpdate(showBanner: true) }
+    }
+
+    private func checkAppUpdate(showBanner: Bool) async {
+        guard !isCheckingAppUpdate, !isInstallingAppUpdate else { return }
+        isCheckingAppUpdate = true
+        defer { isCheckingAppUpdate = false }
+        do {
+            let result = try await runCLI(["updates", "status"])
+            guard result.exitCode == 0 else { throw commandError(result) }
+            let decoded = try BridgeDecode.value(ReleaseUpdateStatus.self, from: result.stdout)
+            releaseUpdate = decoded
+            if showBanner {
+                if decoded.updateAvailable {
+                    show("发现 PCL Relay \(decoded.latestVersion)，可从 GitHub Release 升级", .info)
+                } else if decoded.available {
+                    show("本机 PCL Relay 已是最新版 \(decoded.currentVersion)", .success)
+                } else {
+                    show("暂时无法检查 GitHub Release：\(decoded.error)", .error)
+                }
+            }
+        } catch {
+            if showBanner { show("检查本机更新失败：\(error.localizedDescription)", .error) }
+        }
+    }
+
+    func installAppUpdate() {
+        guard !isInstallingAppUpdate else { return }
+        isInstallingAppUpdate = true
+        Task {
+            defer { isInstallingAppUpdate = false }
+            do {
+                let result = try await runCLI(["updates", "install"])
+                commandLog = BridgeDecode.prettyJSON(result.stdout)
+                guard result.exitCode == 0 else { throw commandError(result) }
+                appRestartRequired = true
+                show("新版本已校验并安装；重新打开应用后即可升级远端设备", .success)
+            } catch {
+                show("本机升级失败：\(error.localizedDescription)", .error)
+            }
+        }
+    }
+
+    func restartApplication() {
+        guard appRestartRequired else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "sleep 1; /usr/bin/open -a 'PCL Relay'"]
+        try? process.run()
+        NSApp.terminate(nil)
     }
 
     func discoverModels() {
@@ -503,16 +581,7 @@ final class AppModel: ObservableObject {
         Task {
             defer { installingClientTarget = nil }
             do {
-                let result: CommandResult
-                switch node.feasibility?.recommendedRoute {
-                case "local_pcl_direct":
-                    result = try await runCLI(["direct", "install", target])
-                case "bridge_via_local_mac":
-                    result = try await runCLI(["bridges", "install", target])
-                default:
-                    result = try await runCLI(["clients", "update", target])
-                }
-                guard result.exitCode == 0 else { throw commandError(result) }
+                let result = try await performRemoteUpdate(node, target: target)
                 commandLog = BridgeDecode.prettyJSON(result.stdout)
                 show("\(node.nodeName) 已升级客户端、模型目录和原生角色；请重新加载该服务器的 VS Code 窗口", .success)
                 await discoverNodes(showBanner: false)
@@ -520,6 +589,57 @@ final class AppModel: ObservableObject {
                 show("远端升级失败：\(error.localizedDescription)", .error)
             }
         }
+    }
+
+    func updateAllRemoteClients() {
+        guard !isUpdatingAllClients, installingClientTarget == nil else { return }
+        let candidates = remoteUpdateCandidates
+        guard !candidates.isEmpty else {
+            show("可管理的远端设备均已是当前版本", .info)
+            return
+        }
+        isUpdatingAllClients = true
+        Task {
+            var succeeded: [String] = []
+            var failed: [String] = []
+            for node in candidates {
+                guard let target = node.sshTarget, !target.isEmpty else {
+                    failed.append("\(node.nodeName)：缺少 SSH 配置")
+                    continue
+                }
+                installingClientTarget = target
+                do {
+                    let result = try await performRemoteUpdate(node, target: target)
+                    commandLog = BridgeDecode.prettyJSON(result.stdout)
+                    succeeded.append(node.nodeName)
+                } catch {
+                    failed.append("\(node.nodeName)：\(error.localizedDescription)")
+                }
+            }
+            installingClientTarget = nil
+            isUpdatingAllClients = false
+            await discoverNodes(showBanner: false)
+            if failed.isEmpty {
+                show("已升级 \(succeeded.count) 台远端设备；请重新加载对应的 VS Code 窗口", .success)
+            } else {
+                commandLog = (["成功：\(succeeded.joined(separator: "、"))"] + failed).joined(separator: "\n")
+                show("远端升级完成：\(succeeded.count) 台成功，\(failed.count) 台失败", .error)
+            }
+        }
+    }
+
+    private func performRemoteUpdate(_ node: RelayCandidate, target: String) async throws -> CommandResult {
+        let result: CommandResult
+        switch node.feasibility?.recommendedRoute {
+        case "local_pcl_direct":
+            result = try await runCLI(["direct", "install", target])
+        case "bridge_via_local_mac":
+            result = try await runCLI(["bridges", "install", target])
+        default:
+            result = try await runCLI(["clients", "update", target])
+        }
+        guard result.exitCode == 0 else { throw commandError(result) }
+        return result
     }
 
     func configureNode(_ node: RelayCandidate, route: String? = nil) {

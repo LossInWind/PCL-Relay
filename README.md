@@ -36,7 +36,7 @@ PCL API Key 默认只保存在所选中转站的 `~/.config/pcl-codex-bridge/api
 
 macOS 的 **PCL Relay.app** 按用户任务收成三个联动页面：
 
-- **网络**：统一拓扑规划、设备连通性、当前中转站运维，以及其他 macOS/Linux 设备的一键安装与升级。
+- **网络**：只分为连接拓扑和设备管理。拓扑回答“怎么连、经过谁”；设备行集中显示可用状态、当前路径、客户端版本和一个主操作。
 - **模型与 Agent**：统一模型目录、对话/流式/工具能力检测、启用角色和 Codex 使用提示。
 - **PCL 门户**：只负责通过当前中转站打开 API 广场、用量和 Key 页面；使用隔离浏览器资料，不修改 macOS 全局代理。
 
@@ -50,6 +50,13 @@ open -a "PCL Relay"
 ```
 
 新 Mac 只需安装 PCL Relay、登录同一个 Tailnet，并在 App 中安装 Codex 集成。应用内包含自包含客户端，不要求单独安装本项目源码。
+
+设备管理顶部的“版本更新”栏统一处理升级：
+
+- 本机从 [`LossInWind/PCL-Relay` GitHub Releases](https://github.com/LossInWind/PCL-Relay/releases) 检查、下载并校验正式安装包。
+- 本机升级并重新打开后，可把同一版本一键同步到所有可管理的 macOS/Linux 远端客户端。
+- 远端设备通过当前 Mac 接收客户端，不要求直接访问 GitHub；不能访问公网的 A6000 Pod 也可以升级。
+- 单台设备仍可在自己的设备行中刷新、测试连通性或执行接入/修复/升级。
 
 ## 使用原生子 Agent
 
@@ -81,6 +88,8 @@ open -a "PCL Relay"
 ~/.local/bin/pcl-codex models discover
 ~/.local/bin/pcl-codex models detect
 ~/.local/bin/pcl-codex models select
+pcl-codex updates status
+pcl-codex updates install
 ```
 
 常用管理命令：
@@ -90,6 +99,7 @@ open -a "PCL Relay"
 - `pcl-codex portal status` / `portal open --path /wallet`：检查或打开 PCL 门户转发。
 - `pcl-codex direct install <ssh-alias>`：让可直接访问 PCL API 的远端主机使用本地回环适配器。
 - `pcl-codex bridges install <ssh-alias>`：仅在直连不可用时建立 Mac 回环桥接。
+- `pcl-codex updates status` / `updates install`：检查并安装最新 GitHub Release；安装前校验 SHA-256 和应用签名完整性。
 - `pcl-codex uninstall`：停止本机路由并只撤销本工具管理的 Codex 配置；保留时间戳备份。
 - `pcl-codex uninstall --gateway`：停止中转站服务并保留 API Key。
 
@@ -107,7 +117,8 @@ open -a "PCL Relay"
 
 ```bash
 python3 -m pytest -q
-swift test --package-path macos
+swift test
+./scripts/package_release.sh
 ```
 
 Responses 转换参考了 MIT 许可的 [`codex-deepseek-proxy`](https://github.com/himmetozcan/codex-deepseek-proxy)。本应用的主要结构是“PCL Tailnet 中转站 + 内嵌 OpenCodex 能力”：统一模型目录、官方透传、`/alpha/search` 官方旁路和原生子 Agent 路由主要参考并迁移自 MIT 许可的 [`OpenCodex`](https://github.com/lidge-jun/opencodex)。[`BigStrongSun/ccswitchmulti`](https://github.com/BigStrongSun/ccswitchmulti) 用于交叉检查 zstd、WebSocket 回退、custom role 和 spawn-agent 模型优先级等兼容细节。运行时不依赖这些项目，也不会安装第二个应用。详见 `NOTICE`。

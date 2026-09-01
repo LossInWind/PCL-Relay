@@ -1,6 +1,6 @@
 [project]
 name = "pcl-codex-bridge"
-version = "2.1.0"
+version = "2.2.0"
 description = "Unified Tailnet PCL relay and Codex native sub-agent manager"
 requires-python = ">=3.9"
 license = {text = "MIT"}

@@ -137,6 +137,32 @@ public struct PortalStatus: Codable, Equatable, Sendable {
     }
 }
 
+public struct ReleaseUpdateStatus: Codable, Equatable, Sendable {
+    public let available: Bool
+    public let source: String
+    public let currentVersion: String
+    public let latestVersion: String
+    public let updateAvailable: Bool
+    public let releaseURL: String
+    public let publishedAt: String
+    public let assetName: String
+    public let assetSize: Int
+    public let checkedAt: String
+    public let error: String
+
+    enum CodingKeys: String, CodingKey {
+        case available, source, error
+        case currentVersion = "current_version"
+        case latestVersion = "latest_version"
+        case updateAvailable = "update_available"
+        case releaseURL = "release_url"
+        case publishedAt = "published_at"
+        case assetName = "asset_name"
+        case assetSize = "asset_size"
+        case checkedAt = "checked_at"
+    }
+}
+
 public struct RemoteClientStatus: Codable, Equatable, Sendable {
     public let ssh: Bool
     public let sshTarget: String?

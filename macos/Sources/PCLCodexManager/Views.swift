@@ -183,12 +183,14 @@ private struct NetworkView: View {
             TopologyInspector(node: selectedNode, relayID: relayID, onPlan: planRoute, onSelectRelay: { node in model.selectRelay(node) })
 
             SectionHeader(
-                title: "设备与远端更新",
-                subtitle: "拓扑负责连接关系；这里负责逐台检查、安装和升级 Codex 接入",
+                title: "设备管理",
+                subtitle: "每台设备只保留可用状态、当前路径、客户端版本和一个主操作",
                 actionTitle: model.isDiscoveringNodes ? "正在扫描" : "扫描全部",
                 actionSymbol: "arrow.clockwise",
                 action: model.refreshTailnetNodes
             )
+
+            SoftwareUpdateStrip()
 
             VStack(spacing: 8) {
                 ForEach(sortedNodes) { node in
@@ -648,6 +650,104 @@ private struct OverviewValue: View {
             Text(label).font(.caption).foregroundStyle(.secondary)
         }
         .frame(minWidth: 58, alignment: .leading)
+    }
+}
+
+private struct SoftwareUpdateStrip: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var localVersion: String {
+        model.releaseUpdate?.currentVersion
+            ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+            ?? "未知"
+    }
+
+    private var latestVersion: String {
+        guard let value = model.releaseUpdate?.latestVersion, !value.isEmpty else { return "尚未检查" }
+        return value
+    }
+
+    private var localSummary: String {
+        if model.appRestartRequired { return "新版本已安装，重新打开后生效" }
+        if model.isCheckingAppUpdate { return "正在检查 GitHub Release" }
+        if model.releaseUpdate?.updateAvailable == true { return "可升级到 \(latestVersion)" }
+        if model.releaseUpdate?.available == true { return "已是最新版" }
+        if let error = model.releaseUpdate?.error, !error.isEmpty { return "暂时无法检查更新" }
+        return "从 GitHub Release 获取正式版本"
+    }
+
+    private var remoteSummary: String {
+        if model.manageableRemoteClients.isEmpty { return "尚未发现可管理的远端客户端" }
+        if model.remoteUpdateCandidates.isEmpty { return "\(model.manageableRemoteClients.count) 台远端设备已同步" }
+        return "\(model.remoteUpdateCandidates.count) 台远端设备待同步"
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "shippingbox.and.arrow.backward.fill")
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(.blue)
+                .frame(width: 40, height: 40)
+                .background(Color.blue.opacity(0.11), in: RoundedRectangle(cornerRadius: 11))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("版本更新").font(.subheadline.weight(.semibold))
+                Text("本机 \(localVersion) · \(localSummary)")
+                    .font(.caption)
+                    .foregroundStyle(model.releaseUpdate?.updateAvailable == true ? .orange : .secondary)
+            }
+
+            Divider().frame(height: 34)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("远端客户端").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(remoteSummary).font(.caption)
+            }
+
+            Spacer(minLength: 12)
+
+            Button { model.refreshAppUpdate() } label: {
+                Label(model.isCheckingAppUpdate ? "检查中" : "检查更新", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(QuietButtonStyle())
+            .disabled(model.isCheckingAppUpdate || model.isInstallingAppUpdate)
+
+            if model.appRestartRequired {
+                Button("重新打开应用") { model.restartApplication() }
+                    .buttonStyle(PrimaryButtonStyle())
+            } else if model.releaseUpdate?.updateAvailable == true {
+                Button(model.isInstallingAppUpdate ? "正在安装" : "升级本机") { model.installAppUpdate() }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(model.isInstallingAppUpdate)
+            }
+
+            if !model.remoteUpdateCandidates.isEmpty {
+                Button(model.isUpdatingAllClients ? "正在同步" : remoteActionTitle) {
+                    model.updateAllRemoteClients()
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .disabled(remoteActionDisabled)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.62), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.white.opacity(0.065)))
+    }
+
+    private var remoteActionTitle: String {
+        if model.appRestartRequired { return "重启后同步远端" }
+        if model.releaseUpdate?.updateAvailable == true { return "先升级本机" }
+        if model.remoteUpdateCandidates.isEmpty { return "远端已同步" }
+        return "同步远端 \(model.remoteUpdateCandidates.count) 台"
+    }
+
+    private var remoteActionDisabled: Bool {
+        model.isUpdatingAllClients
+            || model.installingClientTarget != nil
+            || model.appRestartRequired
+            || model.releaseUpdate?.updateAvailable == true
+            || model.remoteUpdateCandidates.isEmpty
     }
 }
 

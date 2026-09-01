@@ -4,9 +4,9 @@ https://github.com/himmetozcan/codex-deepseek-proxy
 
 The implementation in this repository was rewritten for the PCL Tailnet
 gateway and adds model discovery, a management-only MCP server, client
-installers, and a native Codex v1 sub-agent integration.
+installers, and a native Codex v2 sub-agent integration.
 
-The unified model catalog, official Codex forward-header allowlist, native v1
+The unified model catalog, official Codex forward-header allowlist, native v2
 sub-agent routing, health surface, and dashboard information architecture were
 informed by and selectively migrated from
 OpenCodex (MIT License, copyright 2026 opencodex contributors):

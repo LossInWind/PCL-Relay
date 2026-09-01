@@ -55,4 +55,12 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(status.latencyMS, 82)
         XCTAssertFalse(status.systemProxyChanged ?? true)
     }
+
+    func testDecodesGitHubReleaseUpdateStatus() throws {
+        let json = #"{"available":true,"source":"github:LossInWind/PCL-Relay","current_version":"2.1.0","latest_version":"2.2.0","update_available":true,"release_url":"https://github.com/LossInWind/PCL-Relay/releases/tag/v2.2.0","published_at":"2026-09-01T00:00:00Z","asset_name":"PCL-Relay-macOS.zip","asset_size":42,"checked_at":"2026-09-01T08:00:00+0800","error":""}"#
+        let status = try BridgeDecode.value(ReleaseUpdateStatus.self, from: json)
+        XCTAssertTrue(status.updateAvailable)
+        XCTAssertEqual(status.latestVersion, "2.2.0")
+        XCTAssertEqual(status.assetName, "PCL-Relay-macOS.zip")
+    }
 }

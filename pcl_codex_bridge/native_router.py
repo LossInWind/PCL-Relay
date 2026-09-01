@@ -17,7 +17,7 @@ from .zstd_codec import decompress as zstd_decompress
 
 
 SERVICE_NAME = "pcl-relay-native-router"
-SERVICE_VERSION = "2.1.0"
+SERVICE_VERSION = "2.2.0"
 DEFAULT_PORT = 15724
 PCL_MODEL_PREFIX = "pcl/"
 OPENAI_CODEX_BASE_URL = os.environ.get(
@@ -248,7 +248,7 @@ def _public_response_headers(headers: Any) -> Dict[str, str]:
 
 class NativeRouterHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "PCLRelayNativeRouter/2.1"
+    server_version = "PCLRelayNativeRouter/2.2"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(

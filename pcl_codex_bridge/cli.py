@@ -45,6 +45,7 @@ from .remote_clients import (
 )
 from .bridges import bridge_status, install_bridge, remove_bridge
 from .direct_clients import install_local_direct
+from .release_updater import install_latest_release, latest_release_status
 
 
 SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / "pcl-codex-gateway.service"
@@ -468,6 +469,14 @@ def parser() -> argparse.ArgumentParser:
     direct_install = direct_actions.add_parser("install")
     direct_install.add_argument("ssh_target")
     direct_install.set_defaults(handler=lambda a: install_local_direct(a.ssh_target))
+
+    updates = commands.add_parser("updates")
+    update_actions = updates.add_subparsers(dest="updates_action", required=True)
+    update_status = update_actions.add_parser("status")
+    update_status.set_defaults(handler=lambda a: latest_release_status())
+    update_install = update_actions.add_parser("install")
+    update_install.add_argument("--force", action="store_true")
+    update_install.set_defaults(handler=lambda a: install_latest_release(a.force))
 
     native_router = commands.add_parser("native-router", help=argparse.SUPPRESS)
     native_router.add_argument("--port", type=int, default=15724)

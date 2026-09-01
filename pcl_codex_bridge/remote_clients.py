@@ -290,6 +290,14 @@ def remote_client_status(target: str, gateway_url: str, deep: bool = False) -> D
         return {"ssh": False, "ssh_target": target, "error": f"invalid_status: {exc}"}
     payload["ssh"] = True
     payload["ssh_target"] = target
+    requested_gateway_ready = bool(
+        payload.get("gateway_reachable")
+        and str(payload.get("gateway") or "").rstrip("/") == gateway_url.rstrip("/")
+    )
+    configured_gateway_ready = bool(
+        payload.get("configured_gateway")
+        and payload.get("configured_gateway_reachable")
+    )
     payload["ready"] = bool(
         payload.get("supported_system")
         and payload.get("client_installed")
@@ -298,8 +306,7 @@ def remote_client_status(target: str, gateway_url: str, deep: bool = False) -> D
         and payload.get("native_roles")
         and payload.get("native_router_reachable")
         and payload.get("native_router_gateway_reachable")
-        and payload.get("gateway_reachable")
-        and str(payload.get("gateway") or "").rstrip("/") == gateway_url.rstrip("/")
+        and (requested_gateway_ready or configured_gateway_ready)
         and not payload.get("update_available")
     )
     return payload

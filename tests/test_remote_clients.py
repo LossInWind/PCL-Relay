@@ -23,8 +23,8 @@ class RemoteClientTests(unittest.TestCase):
             "native_v1": False,
             "native_v2": True,
             "native_roles": True,
-            "client_version": "2.2.0",
-            "expected_client_version": "2.2.0",
+            "client_version": "2.2.1",
+            "expected_client_version": "2.2.1",
             "update_available": False,
             "native_router_reachable": True,
             "native_router_gateway_reachable": True,
@@ -48,8 +48,8 @@ class RemoteClientTests(unittest.TestCase):
             "native_v1": False,
             "native_v2": True,
             "native_roles": True,
-            "client_version": "2.2.0",
-            "expected_client_version": "2.2.0",
+            "client_version": "2.2.1",
+            "expected_client_version": "2.2.1",
             "update_available": False,
             "native_router_reachable": True,
             "native_router_gateway_reachable": True,
@@ -69,7 +69,7 @@ class RemoteClientTests(unittest.TestCase):
             "config_managed": True,
             "client_installed": True,
             "client_version": "2.0.0",
-            "expected_client_version": "2.2.0",
+            "expected_client_version": "2.2.1",
             "update_available": True,
             "native_v2": True,
             "native_roles": True,
@@ -84,6 +84,30 @@ class RemoteClientTests(unittest.TestCase):
             result = remote_client_status("old-linux", payload["gateway"])
         self.assertTrue(result["update_available"])
         self.assertFalse(result["ready"])
+
+    def test_remote_status_accepts_active_loopback_route_when_selected_relay_is_unreachable(self):
+        payload = {
+            "system": "Linux",
+            "supported_system": True,
+            "config_managed": True,
+            "client_installed": True,
+            "client_version": "2.2.1",
+            "expected_client_version": "2.2.1",
+            "update_available": False,
+            "native_v2": True,
+            "native_roles": True,
+            "native_router_reachable": True,
+            "native_router_gateway_reachable": True,
+            "gateway": "http://relay.tail.test:15722/v1",
+            "gateway_reachable": False,
+            "configured_gateway": "http://127.0.0.1:15722/v1",
+            "configured_gateway_reachable": True,
+            "error": "selected relay timed out",
+        }
+        completed = subprocess.CompletedProcess([], 0, json.dumps(payload).encode(), b"")
+        with mock.patch("pcl_codex_bridge.remote_clients._run_remote_python", return_value=completed):
+            result = remote_client_status("pcl-pod", payload["gateway"])
+        self.assertTrue(result["ready"])
 
     def test_management_ssh_disables_all_configured_forwardings(self):
         from pcl_codex_bridge.remote_clients import SSH_OPTIONS

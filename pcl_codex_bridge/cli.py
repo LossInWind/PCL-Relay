@@ -19,23 +19,24 @@ from .client_config import (
     discover_models,
     doctor,
     install_client_config,
+    install_native_router_service,
     install_source_tree,
+    choose_native_router_port,
+    native_router_health,
     request_json,
     select_relay,
     uninstall_client_config,
+    uninstall_native_router_service,
+    write_native_catalog,
 )
 from .models import (
     AGENTS,
     DEFAULT_GATEWAY_URL,
-    codex_home,
-    configured_agents,
     load_registry,
     model_alias,
-    model_catalog,
     model_details,
     save_registry,
 )
-from .runner import delegate
 from .remote_clients import (
     discover_remote_clients,
     install_remote_client,
@@ -141,9 +142,14 @@ def install_client(args: argparse.Namespace) -> Dict[str, Any]:
     registry["gateway"] = args.gateway_url
     registry.setdefault("models", {})
     save_registry(registry)
-    result = install_client_config(args.gateway_url)
+    port = choose_native_router_port()
+    service = install_native_router_service(port)
+    result = install_client_config(args.gateway_url, router_port=port)
     result["install_root"] = str(INSTALL_ROOT)
     result["main_provider_preserved"] = True
+    result["official_route"] = "PCL Relay loopback passthrough"
+    result["native_router_service"] = service
+    result["native_router_health"] = native_router_health(port)
     result["unsandboxed_fallback"] = UNSANDBOXED_MARKER.exists()
     return result
 
@@ -201,15 +207,27 @@ def select_models(values: List[str]) -> Dict[str, Any]:
     registry["selected_agents"] = selected
     registry["agent_definitions"] = definitions
     save_registry(registry)
-    catalog = codex_home() / "pcl-models.json"
-    catalog.parent.mkdir(parents=True, exist_ok=True)
-    catalog.write_text(json.dumps(model_catalog(definitions), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    catalog = write_native_catalog(registry)
     return {
         "selected_agents": selected,
         "models": {name: definitions[name]["model"] for name in selected},
         "catalog": str(catalog),
         "codex_reload_required": True,
+        "delegation": "native_spawn_agent",
     }
+
+
+def uninstall_client() -> Dict[str, Any]:
+    service = uninstall_native_router_service()
+    config = uninstall_client_config()
+    return {"service": service, "config": config}
+
+
+def serve_native_router(args: argparse.Namespace) -> Dict[str, Any]:
+    from .native_router import serve
+
+    serve("127.0.0.1", int(args.port))
+    return {"stopped": True}
 
 
 def admin_root(gateway_url: str) -> str:
@@ -448,20 +466,14 @@ def parser() -> argparse.ArgumentParser:
     direct_install.add_argument("ssh_target")
     direct_install.set_defaults(handler=lambda a: install_local_direct(a.ssh_target))
 
-    delegated = commands.add_parser("delegate")
-    delegated.add_argument("agent", choices=list(configured_agents()))
-    delegated.add_argument("task")
-    delegated.add_argument("--workspace", default=os.getcwd())
-    delegated.add_argument("--timeout", type=int, default=1800)
-    delegated.add_argument("--execution-mode", choices=["read-only", "workspace-write"], default="workspace-write")
-    delegated.set_defaults(
-        handler=lambda a: delegate(a.agent, a.task, a.workspace, a.timeout, a.execution_mode)
-    )
+    native_router = commands.add_parser("native-router", help=argparse.SUPPRESS)
+    native_router.add_argument("--port", type=int, default=15724)
+    native_router.set_defaults(handler=serve_native_router)
 
     uninstall = commands.add_parser("uninstall")
     uninstall.add_argument("--gateway", action="store_true")
     uninstall.set_defaults(
-        handler=lambda a: uninstall_gateway() if a.gateway else uninstall_client_config()
+        handler=lambda a: uninstall_gateway() if a.gateway else uninstall_client()
     )
     return root
 

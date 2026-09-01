@@ -1,20 +1,13 @@
 import unittest
 
 from pcl_codex_bridge.mcp_server import tools
-from pcl_codex_bridge.models import AGENTS
-
-
 class McpTests(unittest.TestCase):
-    def test_exposes_generic_and_named_agent_tools(self):
+    def test_mcp_is_management_only(self):
         names = {tool["name"] for tool in tools()}
-        self.assertIn("pcl_models", names)
-        self.assertIn("pcl_delegate", names)
-        self.assertTrue(set(AGENTS).issubset(names))
-
-    def test_named_tools_require_task_and_workspace(self):
-        by_name = {tool["name"]: tool for tool in tools()}
-        for name in AGENTS:
-            self.assertEqual(by_name[name]["inputSchema"]["required"], ["task", "workspace"])
+        self.assertEqual(names, {"pcl_models", "pcl_native_status"})
+        self.assertNotIn("pcl_delegate", names)
+        descriptions = " ".join(tool["description"] for tool in tools())
+        self.assertIn("pcl_deepseek_pro=pcl/DeepSeek-V4-Pro", descriptions)
 
 
 if __name__ == "__main__":

@@ -20,12 +20,18 @@ if [[ -e "$STAGING" ]]; then
 fi
 
 mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Resources"
-mkdir -p "$STAGING/Contents/Resources/bridge/python/bin" "$STAGING/Contents/Resources/bridge/python/lib" "$STAGING/Contents/Resources/bridge/src"
+mkdir -p "$STAGING/Contents/Resources/bridge/python/bin" "$STAGING/Contents/Resources/bridge/python/lib" "$STAGING/Contents/Resources/bridge/src" "$STAGING/Contents/Resources/bridge/lib"
 cp "$ROOT/.build/release/PCLCodexManager" "$STAGING/Contents/MacOS/PCLCodexManager"
 cp "$ROOT/macos/Info.plist" "$STAGING/Contents/Info.plist"
 cp "$PYTHON_ROOT/bin/python3.12" "$STAGING/Contents/Resources/bridge/python/bin/python3.12"
 ln -s python3.12 "$STAGING/Contents/Resources/bridge/python/bin/python3"
 cp "$PYTHON_ROOT/lib/libpython3.12.dylib" "$STAGING/Contents/Resources/bridge/python/lib/libpython3.12.dylib"
+ZSTD_LIBRARY="${PCL_EMBED_ZSTD_LIBRARY:-/opt/homebrew/opt/zstd/lib/libzstd.1.dylib}"
+if [[ ! -f "$ZSTD_LIBRARY" ]]; then
+  echo "libzstd runtime not found at $ZSTD_LIBRARY" >&2
+  exit 1
+fi
+cp "$ZSTD_LIBRARY" "$STAGING/Contents/Resources/bridge/lib/libzstd.1.dylib"
 rsync -a --exclude site-packages --exclude __pycache__ --exclude '*.pyc' "$PYTHON_ROOT/lib/python3.12/" "$STAGING/Contents/Resources/bridge/python/lib/python3.12/"
 rsync -a --exclude __pycache__ --exclude '*.pyc' "$ROOT/pcl_codex_bridge/" "$STAGING/Contents/Resources/bridge/src/pcl_codex_bridge/"
 cp "$ROOT/scripts/pcl-codex-bundled" "$STAGING/Contents/Resources/bridge/pcl-codex"
@@ -41,7 +47,14 @@ fi
 swift "$ROOT/scripts/make_icon.swift" "$ICONSET"
 iconutil -c icns "$ICONSET" -o "$STAGING/Contents/Resources/AppIcon.icns"
 
+# Python must never mutate a signed application bundle.  Remove any bytecode
+# inherited from a source/runtime tree and make resources read-only after the
+# signature is created; runtime state belongs under the user's Library.
+find "$STAGING/Contents/Resources" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$STAGING/Contents/Resources" -type f -name '*.pyc' -delete
 codesign --force --deep --sign - "$STAGING"
+chmod -R a-w "$STAGING/Contents/Resources"
+codesign --verify --deep --strict "$STAGING"
 
 if [[ -e "$DESTINATION" ]]; then
   mkdir -p "$ROOT/.build/app-install-backups"

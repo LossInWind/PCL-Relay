@@ -8,7 +8,11 @@ from unittest import mock
 from pcl_codex_bridge.client_config import (
     BEGIN,
     END,
+    ROOT_BEGIN,
+    ROOT_END,
     INSTALL_ROOT,
+    _make_tree_owner_writable,
+    combined_catalog,
     find_tailscale,
     install_client_config,
     install_source_tree,
@@ -20,6 +24,18 @@ from pcl_codex_bridge.models import AGENTS, model_catalog
 
 
 class ClientConfigTests(unittest.TestCase):
+    def test_signed_bundle_copy_is_made_writable_before_reinstall(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "pcl_codex_bridge"
+            root.mkdir()
+            source = root / "native_router.py"
+            source.write_text("old\n", encoding="utf-8")
+            source.chmod(0o444)
+            root.chmod(0o555)
+            _make_tree_owner_writable(root)
+            source.write_text("new\n", encoding="utf-8")
+            self.assertEqual(source.read_text(encoding="utf-8"), "new\n")
+
     def test_finds_tailscale_outside_gui_app_path(self):
         with tempfile.TemporaryDirectory() as temp:
             executable = Path(temp) / "Tailscale"
@@ -62,15 +78,26 @@ class ClientConfigTests(unittest.TestCase):
             config = home / "config.toml"
             original = 'model = "gpt-5.6-sol"\nmodel_provider = "openai"\n\n[features]\nmulti_agent = true\n'
             config.write_text(original, encoding="utf-8")
-            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}),
+                mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
+                mock.patch("pcl_codex_bridge.client_config.save_registry"),
+            ):
                 result = install_client_config("http://tailnet:15722/v1")
             updated = config.read_text(encoding="utf-8")
             self.assertIn('model = "gpt-5.6-sol"', updated)
             self.assertIn('model_provider = "openai"', updated)
             self.assertIn(BEGIN, updated)
-            self.assertIn('[model_providers.pcl_internal]', updated)
+            self.assertIn(ROOT_BEGIN, updated)
+            self.assertIn('openai_base_url = "http://127.0.0.1:15724/v1"', updated)
+            self.assertIn('[mcp_servers.pcl_relay]', updated)
+            self.assertIn('[agents]', updated)
+            self.assertIn('default_subagent_model = "pcl/DeepSeek-V4-Pro"', updated)
+            self.assertNotIn('[model_providers.pcl_internal]', updated)
+            self.assertNotIn('[mcp_servers.pcl_agents]', updated)
             self.assertIn('default_tools_approval_mode = "approve"', updated)
-            self.assertTrue(Path(result["profile"]).exists())
+            self.assertTrue(Path(result["catalog"]).exists())
+            self.assertEqual(result["delegation"], "native_spawn_agent")
 
     def test_install_is_idempotent_and_uninstall_removes_only_managed_block(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -78,18 +105,35 @@ class ClientConfigTests(unittest.TestCase):
             home.mkdir()
             config = home / "config.toml"
             config.write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
-            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}),
+                mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
+                mock.patch("pcl_codex_bridge.client_config.save_registry"),
+            ):
                 install_client_config()
                 install_client_config()
                 self.assertEqual(config.read_text(encoding="utf-8").count(BEGIN), 1)
+                self.assertEqual(config.read_text(encoding="utf-8").count(ROOT_BEGIN), 1)
                 uninstall_client_config()
             remaining = config.read_text(encoding="utf-8")
             self.assertIn('model = "gpt-5.6-sol"', remaining)
             self.assertNotIn(BEGIN, remaining)
+            self.assertNotIn(ROOT_BEGIN, remaining)
 
     def test_catalog_contains_all_fixed_agents(self):
         slugs = {item["slug"] for item in model_catalog()["models"]}
         self.assertEqual(slugs, {info["model"] for info in AGENTS.values()})
+
+    def test_combined_catalog_routes_pcl_and_forces_native_v1(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+                models = combined_catalog()["models"]
+        pcl = [item for item in models if item["slug"].startswith("pcl/")]
+        official = [item for item in models if item["slug"].startswith("gpt-")]
+        self.assertEqual({item["slug"] for item in pcl}, {"pcl/" + info["model"] for info in AGENTS.values()})
+        self.assertTrue(official)
+        self.assertTrue(all(item["multi_agent_version"] == "v1" for item in models))
 
     def test_standalone_mcp_block_uses_bundled_cli(self):
         block = managed_block("http://tailnet:15722/v1", "/Users/test/.local/bin/pcl-codex", True)

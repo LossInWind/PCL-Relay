@@ -10,12 +10,27 @@ public struct DoctorStatus: Codable, Equatable, Sendable {
     public let registry: Bool
     public let unsandboxedFallback: Bool
     public let gatewayError: String?
+    public let nativeRouter: Bool?
+    public let nativeCatalog: Bool?
+    public let nativeV1: Bool?
+    public let managementMCP: Bool?
+    public let legacyDelegateMCP: Bool?
+    public let delegation: String?
+    public let multiAgentSurface: String?
+    public let nativeRouterPort: Int?
 
     enum CodingKeys: String, CodingKey {
-        case gateway, tailscale, codex, profile, catalog, registry
+        case gateway, tailscale, codex, profile, catalog, registry, delegation
         case configManaged = "config_managed"
         case unsandboxedFallback = "unsandboxed_fallback"
         case gatewayError = "gateway_error"
+        case nativeRouter = "native_router"
+        case nativeCatalog = "native_catalog"
+        case nativeV1 = "native_v1"
+        case managementMCP = "management_mcp"
+        case legacyDelegateMCP = "legacy_delegate_mcp"
+        case multiAgentSurface = "multi_agent_surface"
+        case nativeRouterPort = "native_router_port"
     }
 }
 
@@ -133,6 +148,10 @@ public struct RemoteClientStatus: Codable, Equatable, Sendable {
     public let relayCapable: Bool?
     public let configManaged: Bool?
     public let clientInstalled: Bool?
+    public let nativeV1: Bool?
+    public let nativeRouterPort: Int?
+    public let nativeRouterReachable: Bool?
+    public let nativeRouterGatewayReachable: Bool?
     public let gateway: String?
     public let gatewayReachable: Bool?
     public let gatewayLatencyMS: Int?
@@ -156,6 +175,10 @@ public struct RemoteClientStatus: Codable, Equatable, Sendable {
         case relayCapable = "relay_capable"
         case configManaged = "config_managed"
         case clientInstalled = "client_installed"
+        case nativeV1 = "native_v1"
+        case nativeRouterPort = "native_router_port"
+        case nativeRouterReachable = "native_router_reachable"
+        case nativeRouterGatewayReachable = "native_router_gateway_reachable"
         case gatewayReachable = "gateway_reachable"
         case gatewayLatencyMS = "gateway_latency_ms"
         case gatewayModelCount = "gateway_model_count"
@@ -336,38 +359,6 @@ public struct ModelRegistry: Codable, Equatable, Sendable {
         case allChatReady = "all_chat_ready"
         case allStreamReady = "all_stream_ready"
         case allToolCompatible = "all_tool_compatible"
-    }
-}
-
-public struct DelegateReport: Codable, Equatable, Sendable {
-    public let agent: String?
-    public let model: String?
-    public let workspace: String?
-    public let executionMode: String?
-    public let effectiveSandbox: String?
-    public let returncode: Int?
-    public let timedOut: Bool?
-    public let durationSeconds: Double?
-    public let summary: String?
-    public let gitRepository: Bool?
-    public let gitStatusBefore: String?
-    public let gitStatusAfter: String?
-    public let gitDiff: String?
-    public let modifiedFiles: [String]?
-    public let stderrTail: String?
-
-    enum CodingKeys: String, CodingKey {
-        case agent, model, workspace, returncode, summary
-        case executionMode = "execution_mode"
-        case effectiveSandbox = "effective_sandbox"
-        case timedOut = "timed_out"
-        case durationSeconds = "duration_seconds"
-        case gitRepository = "git_repository"
-        case gitStatusBefore = "git_status_before"
-        case gitStatusAfter = "git_status_after"
-        case gitDiff = "git_diff"
-        case modifiedFiles = "modified_files"
-        case stderrTail = "stderr_tail"
     }
 }
 

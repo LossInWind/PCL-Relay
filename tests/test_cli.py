@@ -33,12 +33,13 @@ class CliTests(unittest.TestCase):
             with (
                 mock.patch("pcl_codex_bridge.cli.load_registry", return_value=registry),
                 mock.patch("pcl_codex_bridge.cli.save_registry") as save,
-                mock.patch("pcl_codex_bridge.cli.codex_home", return_value=Path(temp)),
+                mock.patch("pcl_codex_bridge.client_config.codex_home", return_value=Path(temp)),
             ):
                 result = select_models(["Qwen3.6-35B"])
-                catalog = json.loads((Path(temp) / "pcl-models.json").read_text())
+                catalog = json.loads((Path(temp) / "pcl-native-models.json").read_text())
         self.assertEqual(result["selected_agents"], ["pcl_qwen3_6_35b"])
-        self.assertEqual(catalog["models"][0]["slug"], "Qwen3.6-35B")
+        self.assertEqual(catalog["models"][0]["slug"], "pcl/Qwen3.6-35B")
+        self.assertEqual(catalog["models"][0]["multi_agent_version"], "v1")
         self.assertEqual(save.call_args.args[0]["agent_definitions"]["pcl_qwen3_6_35b"]["model"], "Qwen3.6-35B")
 
     def test_select_rejects_non_agent_model(self):

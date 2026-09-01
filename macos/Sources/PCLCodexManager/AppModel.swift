@@ -67,12 +67,10 @@ final class AppModel: ObservableObject {
     @Published var remoteStatusText = "尚未检查"
     @Published var gatewayLogs = ""
     @Published var commandLog = ""
-    @Published var delegateReport: DelegateReport?
     @Published var isRefreshing = false
     @Published var isDetecting = false
     @Published var isDiscovering = false
     @Published var isSavingAgents = false
-    @Published var isRunningAgent = false
     @Published var isRestartingGateway = false
     @Published var isCheckingPortal = false
     @Published var isOpeningPortal = false
@@ -88,7 +86,6 @@ final class AppModel: ObservableObject {
 
     private let runner = CommandRunner()
     private var detectionJob: UUID?
-    private var delegateJob: UUID?
     let relayNodeName = "haichen-pcl-linux-3070ti"
     let relayMagicDNS = "haichen-pcl-linux-3070ti.tail132f30.ts.net"
     let relayTailscaleIP = "100.113.234.58"
@@ -113,7 +110,11 @@ final class AppModel: ObservableObject {
     }
 
     var codexIntegrationReady: Bool {
-        doctor?.codex == true && doctor?.configManaged == true && doctor?.profile == true && doctor?.catalog == true
+        doctor?.codex == true
+            && doctor?.configManaged == true
+            && doctor?.nativeRouter == true
+            && doctor?.nativeCatalog == true
+            && doctor?.nativeV1 == true
     }
 
     var relayReady: Bool {
@@ -274,7 +275,7 @@ final class AppModel: ObservableObject {
             do {
                 let result = try await runCLI(["models", "select"] + ordered)
                 guard result.exitCode == 0 else { throw commandError(result) }
-                show("子 Agent 已更新；重新加载 Codex 后生效，官方 GPT 保持不变", .success)
+                show("Codex 原生子 Agent 已更新；新建任务或重新加载 Codex 后生效", .success)
             } catch {
                 show("保存失败：\(error.localizedDescription)", .error)
             }
@@ -286,7 +287,7 @@ final class AppModel: ObservableObject {
             do {
                 let result = try await runCLI(["install", "client"])
                 guard result.exitCode == 0 else { throw commandError(result) }
-                show("Codex 子 Agent 已安装/修复，请重新加载 Codex", .success)
+                show("PCL Relay 原生子 Agent 已安装/修复；请新建任务或重新加载 Codex", .success)
                 refreshAll()
             } catch {
                 show("安装失败：\(error.localizedDescription)", .error)
@@ -572,46 +573,6 @@ final class AppModel: ObservableObject {
         case "bridge_via_local_mac": return "当前 Mac 桥接"
         default: return route
         }
-    }
-
-    func runAgent(agent: String, task: String, workspace: String, readOnly: Bool, timeout: Int) {
-        guard !isRunningAgent else { return }
-        guard !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            show("请先填写任务", .info)
-            return
-        }
-        let job = UUID()
-        delegateJob = job
-        isRunningAgent = true
-        delegateReport = nil
-        commandLog = "正在启动 \(agent)……"
-        Task {
-            defer {
-                isRunningAgent = false
-                delegateJob = nil
-            }
-            do {
-                let args = [
-                    "delegate", agent, task,
-                    "--workspace", workspace,
-                    "--timeout", String(timeout),
-                    "--execution-mode", readOnly ? "read-only" : "workspace-write",
-                ]
-                let result = try await runCLI(args, id: job)
-                commandLog = BridgeDecode.prettyJSON(result.stdout) + (result.stderr.isEmpty ? "" : "\n" + result.stderr)
-                guard result.exitCode == 0 else { throw commandError(result) }
-                delegateReport = try BridgeDecode.value(DelegateReport.self, from: result.stdout)
-                show("子 Agent 任务已完成", .success)
-            } catch {
-                show("子 Agent 已停止：\(error.localizedDescription)", .error)
-            }
-        }
-    }
-
-    func cancelAgent() {
-        guard let delegateJob else { return }
-        runner.cancel(delegateJob)
-        commandLog += "\n正在停止子 Agent……"
     }
 
     func copyGatewayURL() {

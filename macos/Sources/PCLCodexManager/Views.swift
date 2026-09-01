@@ -1235,10 +1235,6 @@ private struct PortalRouteNode: View {
 private struct AgentsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedAgent = "pcl_deepseek_pro"
-    @State private var task = ""
-    @State private var workspace = NSHomeDirectory() + "/Codebase"
-    @State private var readOnly = false
-    @State private var timeout = 1800
 
     var body: some View {
         ScrollView {
@@ -1247,7 +1243,7 @@ private struct AgentsView: View {
 
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 12) {
-                        SectionHeader(title: "可供 GPT 调用的子 Agent", subtitle: "关闭后不会出现在可选执行代理中")
+                        SectionHeader(title: "Codex 原生子 Agent", subtitle: "启用后由主 GPT 通过原生 spawn_agent 调用")
                         ForEach(model.agentOptions) { agent in
                             AgentToggleCard(
                                 agent: agent,
@@ -1261,17 +1257,7 @@ private struct AgentsView: View {
                     }
                     .frame(maxWidth: 430)
 
-                    AgentTaskCard(
-                        selectedAgent: $selectedAgent,
-                        task: $task,
-                        workspace: $workspace,
-                        readOnly: $readOnly,
-                        timeout: $timeout
-                    )
-                }
-
-                if model.isRunningAgent || model.delegateReport != nil || !model.commandLog.isEmpty {
-                    AgentResultPanel()
+                    NativeAgentUsageCard(selectedAgent: selectedAgent)
                 }
             }
             .padding(22)
@@ -1295,14 +1281,14 @@ private struct AgentFlowCard: View {
     var body: some View {
         GlassCard {
             HStack(spacing: 14) {
-                FlowNode(symbol: "sparkles", title: "官方 GPT", detail: "主会话保持不变", color: .green)
+                FlowNode(symbol: "sparkles", title: "官方 GPT", detail: "登录与模型选择保留", color: .green)
                 FlowArrow()
-                FlowNode(symbol: "point.3.connected.trianglepath.dotted", title: "MCP 委派", detail: "自动或点名调用", color: .blue)
+                FlowNode(symbol: "arrow.triangle.branch", title: "PCL Relay 路由", detail: "一个 App 内置", color: .blue)
                 FlowArrow()
-                FlowNode(symbol: "person.3.sequence.fill", title: "PCL 子 Agent", detail: "独立 Codex 进程", color: .purple)
+                FlowNode(symbol: "person.3.sequence.fill", title: "原生子 Agent", detail: "过程显示在 Codex", color: .purple)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
-                    StatusPill(title: model.codexIntegrationReady ? "已注册" : "未注册", active: model.codexIntegrationReady, symbol: "puzzlepiece.extension.fill")
+                    StatusPill(title: model.codexIntegrationReady ? "原生 v1 已就绪" : "需要安装", active: model.codexIntegrationReady, symbol: "arrow.triangle.branch")
                     Button(model.codexIntegrationReady ? "修复注册" : "安装到 Codex") {
                         model.installCodexIntegration()
                     }
@@ -1313,129 +1299,61 @@ private struct AgentFlowCard: View {
     }
 }
 
-private struct AgentTaskCard: View {
+private struct NativeAgentUsageCard: View {
     @EnvironmentObject private var model: AppModel
-    @Binding var selectedAgent: String
-    @Binding var task: String
-    @Binding var workspace: String
-    @Binding var readOnly: Bool
-    @Binding var timeout: Int
+    let selectedAgent: String
+
+    private var selected: AgentDefinition? {
+        model.agentOptions.first { $0.id == selectedAgent }
+    }
 
     var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 15) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("调用测试 / 直接执行")
-                        .font(.headline)
-                    Text("GPT 委派会自动沿用当前 Codex/VS Code 工作区；下方目录只用于 App 内手动测试。")
+                    Text("在 Codex 中直接使用").font(.headline)
+                    Text("不再启动外部 codex exec，也不需要手动填写工作区。子 Agent 自动继承主任务的当前工作区和权限。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                Picker("子 Agent", selection: $selectedAgent) {
-                    ForEach(model.agentOptions.filter { model.selectedAgents.contains($0.id) }) { agent in
-                        Text("\(agent.title) · \(agent.model)").tag(agent.id)
+                HStack(spacing: 10) {
+                    Image(systemName: selected?.symbol ?? "person.3.fill")
+                        .foregroundStyle(selected?.tint ?? .purple)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selected?.title ?? selectedAgent).font(.subheadline.weight(.semibold))
+                        Text("原生模型 ID：pcl/\(selected?.model ?? "")")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("手动测试工作区").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    HStack {
-                        TextField("/path/to/project", text: $workspace)
-                            .textFieldStyle(.roundedBorder)
-                        Button("选择…") { chooseWorkspace() }
-                    }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("示例").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    NativePromptExample(text: "让 \(selectedAgent) 实现这个功能，并运行测试；完成后由你复核。")
+                    NativePromptExample(text: "启动多个 \(selectedAgent) 子 Agent，并行处理边界清晰的子任务。")
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("任务").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    TextEditor(text: $task)
-                        .font(.body)
-                        .scrollContentBackground(.hidden)
-                        .padding(8)
-                        .frame(minHeight: 130)
-                        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 9))
-                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(0.08)))
-                }
-
-                HStack {
-                    Toggle("只读分析", isOn: $readOnly)
-                        .toggleStyle(.switch)
-                    Spacer()
-                    Stepper("超时 \(timeout / 60) 分钟", value: $timeout, in: 60...3600, step: 300)
-                        .font(.caption)
-                }
-
-                if model.isRunningAgent {
-                    Button(role: .destructive) { model.cancelAgent() } label: {
-                        Label("停止子 Agent", systemImage: "stop.circle.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
-                } else {
-                    Button {
-                        model.runAgent(agent: selectedAgent, task: task, workspace: workspace, readOnly: readOnly, timeout: timeout)
-                    } label: {
-                        Label("运行子 Agent", systemImage: "play.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(!model.selectedAgents.contains(selectedAgent))
-                }
+                Divider().opacity(0.35)
+                Label("运行时会像 Codex 自带子 Agent 一样显示创建、进度和结果。", systemImage: "eye.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity)
     }
-
-    private func chooseWorkspace() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: workspace)
-        if panel.runModal() == .OK, let path = panel.url?.path {
-            workspace = path
-        }
-    }
 }
 
-private struct AgentResultPanel: View {
-    @EnvironmentObject private var model: AppModel
+private struct NativePromptExample: View {
+    let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(model.isRunningAgent ? "子 Agent 正在执行" : "执行结果")
-                    .font(.headline)
-                if model.isRunningAgent { ProgressView().controlSize(.small) }
-                Spacer()
-                if let report = model.delegateReport {
-                    StatusPill(title: report.returncode == 0 ? "成功" : "失败", active: report.returncode == 0, symbol: report.returncode == 0 ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    if let seconds = report.durationSeconds {
-                        Text(String(format: "%.1f 秒", seconds)).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if let report = model.delegateReport {
-                ConsolePanel(text: reportText(report), title: report.effectiveSandbox ?? "执行摘要")
-            } else {
-                ConsolePanel(text: model.commandLog, title: "运行状态")
-            }
-        }
-    }
-
-    private func reportText(_ report: DelegateReport) -> String {
-        var parts = [report.summary ?? "无摘要"]
-        if let files = report.modifiedFiles, !files.isEmpty {
-            parts.append("修改文件\n" + files.joined(separator: "\n"))
-        }
-        if let diff = report.gitDiff, !diff.isEmpty {
-            parts.append("Git Diff\n" + diff)
-        }
-        if let stderr = report.stderrTail, !stderr.isEmpty {
-            parts.append("诊断\n" + stderr)
-        }
-        return parts.joined(separator: "\n\n")
+        Text(text)
+            .font(.system(.caption, design: .monospaced))
+            .textSelection(.enabled)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 

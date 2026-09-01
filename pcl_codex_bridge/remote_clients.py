@@ -136,6 +136,17 @@ try:
 except Exception:
     registry = {}
 configured_gateway = registry.get("gateway") or ""
+native_router_port = int(registry.get("native_router_port") or 15724)
+native_router_reachable = False
+native_router_gateway_reachable = False
+try:
+    native_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with native_opener.open(f"http://127.0.0.1:{native_router_port}/healthz", timeout=5) as response:
+        native_payload = json.loads(response.read().decode("utf-8"))
+    native_router_reachable = native_payload.get("service") == "pcl-relay-native-router"
+    native_router_gateway_reachable = bool(native_payload.get("gateway_reachable"))
+except Exception:
+    pass
 gateway = os.environ.get("PCL_REMOTE_GATEWAY") or configured_gateway
 reachable = False
 error = ""
@@ -210,7 +221,16 @@ print(json.dumps({
     "workspace_tailscale_ip": workspace_tailscale_ip,
     "pcl_network_reachable": pcl_network_reachable,
     "relay_capable": bool(workspace_tailscale_ip) and pcl_network_reachable and platform.system() == "Linux",
-    "config_managed": "# >>> pcl-codex-bridge managed block >>>" in text and "# <<< pcl-codex-bridge managed block <<<" in text,
+    "config_managed": all(marker in text for marker in (
+        "# >>> pcl-codex-bridge managed block >>>",
+        "# <<< pcl-codex-bridge managed block <<<",
+        "# >>> pcl-relay native router root >>>",
+        "# <<< pcl-relay native router root <<<",
+    )),
+    "native_v1": '"multi_agent_version": "v1"' in (home / ".codex" / "pcl-native-models.json").read_text(encoding="utf-8", errors="replace") if (home / ".codex" / "pcl-native-models.json").exists() else False,
+    "native_router_port": native_router_port,
+    "native_router_reachable": native_router_reachable,
+    "native_router_gateway_reachable": native_router_gateway_reachable,
     "client_installed": (home / ".local" / "bin" / "pcl-codex").exists(),
     "gateway": gateway,
     "gateway_reachable": reachable,
@@ -251,6 +271,9 @@ def remote_client_status(target: str, gateway_url: str, deep: bool = False) -> D
         payload.get("supported_system")
         and payload.get("client_installed")
         and payload.get("config_managed")
+        and payload.get("native_v1")
+        and payload.get("native_router_reachable")
+        and payload.get("native_router_gateway_reachable")
         and payload.get("gateway_reachable")
         and str(payload.get("gateway") or "").rstrip("/") == gateway_url.rstrip("/")
     )
@@ -621,7 +644,7 @@ def install_remote_client(target: str, gateway_url: str) -> Dict[str, Any]:
         raise RuntimeError("Invalid selected gateway URL")
     source = "import os\nos.environ['PCL_REMOTE_GATEWAY'] = " + repr(gateway_url) + "\n" + REMOTE_INSTALL_SOURCE
     try:
-        result = _run_remote_python(target, source, stdin=_source_archive(), timeout=90)
+        result = _run_remote_python(target, source, stdin=_source_archive(), timeout=180)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Remote client installation timed out: {exc}") from exc
     if result.returncode != 0:
@@ -635,6 +658,7 @@ def install_remote_client(target: str, gateway_url: str) -> Dict[str, Any]:
         "gateway": gateway_url,
         "status": status,
         "vscode_reload_required": True,
-        "scope": ["~/.codex", "~/.local/share/pcl-codex-bridge", "~/.local/bin/pcl-codex"],
+        "scope": ["~/.codex", "~/.local/share/pcl-codex-bridge", "~/.local/bin/pcl-codex", "user native-router service"],
         "main_provider_preserved": True,
+        "delegation": "native_spawn_agent",
     }

@@ -3,28 +3,25 @@ import BridgeCore
 import SwiftUI
 
 private enum AppSection: String, CaseIterable, Identifiable {
-    case topology = "拓扑配置"
-    case relay = "中转站"
+    case network = "网络"
+    case models = "模型与 Agent"
     case portal = "PCL 门户"
-    case agents = "子 Agent"
     var id: String { rawValue }
     var symbol: String {
         switch self {
-        case .topology: return "circle.hexagongrid.fill"
-        case .relay: return "point.3.connected.trianglepath.dotted"
+        case .network: return "point.3.connected.trianglepath.dotted"
+        case .models: return "person.3.sequence.fill"
         case .portal: return "globe.asia.australia.fill"
-        case .agents: return "person.3.sequence.fill"
         }
     }
 }
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage("selectedSection") private var sectionRaw = AppSection.topology.rawValue
+    @AppStorage("selectedSection") private var sectionRaw = AppSection.network.rawValue
 
     private var section: AppSection {
-        AppSection(rawValue: sectionRaw) ?? .relay
+        AppSection(rawValue: sectionRaw) ?? .network
     }
 
     private var sectionBinding: Binding<AppSection> {
@@ -47,14 +44,11 @@ struct RootView: View {
                 HeaderBar(section: sectionBinding)
                 Group {
                     switch section {
-                    case .topology: TopologyView()
-                    case .relay: RelayView()
+                    case .network: NetworkView()
+                    case .models: ModelsAgentsView()
                     case .portal: PortalView()
-                    case .agents: AgentsView()
                     }
                 }
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .trailing)))
-                .animation(reduceMotion ? nil : .snappy(duration: 0.32), value: section)
             }
 
             if let banner = model.banner {
@@ -76,7 +70,7 @@ private struct PlannedTopologyEdge: Identifiable, Hashable {
     var verified: Bool
 }
 
-private struct TopologyView: View {
+private struct NetworkView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var positions: [String: CGPoint] = [:]
@@ -87,16 +81,20 @@ private struct TopologyView: View {
     @State private var plannedEdges: [PlannedTopologyEdge] = []
     @State private var interactionHint = "拖动设备调整布局；开启连线模式后依次点击两个设备的连接点。"
     @State private var initializedRecommendation = false
+    @State private var showLogs = false
 
     private var relayID: String { model.relayDiscovery?.recommendation?.relayID ?? model.currentRelay?.tailscaleIP ?? "" }
     private var localID: String { model.tailnetNodes.first(where: \.isSelf)?.tailscaleIP ?? "" }
     private var selectedNode: RelayCandidate? { model.tailnetNodes.first { $0.tailscaleIP == selectedID } }
 
     var body: some View {
-        VStack(spacing: 0) {
+        ScrollView {
+        VStack(spacing: 16) {
+            RelayOverviewCard()
+
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Tailnet 拓扑编辑器").font(.title3.weight(.semibold))
+                    Text("连接拓扑").font(.title3.weight(.semibold))
                     Text("当前中转站：\(shortDeviceName(model.currentRelay?.nodeName ?? model.relayNodeName))  ·  \(interactionHint)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -117,8 +115,6 @@ private struct TopologyView: View {
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(model.isApplyingTopology || model.topologyRoutes.isEmpty)
             }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 14)
 
             GeometryReader { proxy in
                 ZStack {
@@ -163,7 +159,6 @@ private struct TopologyView: View {
                 .coordinateSpace(name: "topology")
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.09)))
-                .padding(.horizontal, 20)
                 .onAppear {
                     seedPositions(size: proxy.size)
                     if model.relayDiscovery?.recommendation != nil {
@@ -183,11 +178,45 @@ private struct TopologyView: View {
                 }
                 .onChange(of: model.topologyRoutes) { _, _ in rebuildEdges() }
             }
-            .frame(minHeight: 330)
+            .frame(height: 370)
 
             TopologyInspector(node: selectedNode, relayID: relayID, onPlan: planRoute, onSelectRelay: { node in model.selectRelay(node) })
-                .padding(.horizontal, 22)
-                .padding(.vertical, 14)
+
+            SectionHeader(
+                title: "设备与远端更新",
+                subtitle: "拓扑负责连接关系；这里负责逐台检查、安装和升级 Codex 接入",
+                actionTitle: model.isDiscoveringNodes ? "正在扫描" : "扫描全部",
+                actionSymbol: "arrow.clockwise",
+                action: model.refreshTailnetNodes
+            )
+
+            VStack(spacing: 8) {
+                ForEach(sortedNodes) { node in
+                    UnifiedDeviceRow(node: node)
+                }
+            }
+
+            DisclosureGroup("当前中转站服务") {
+                ServerControlCard(showLogs: $showLogs)
+                    .padding(.top, 10)
+                if showLogs {
+                    ConsolePanel(text: model.gatewayLogs, title: "中转站日志（已脱敏）")
+                        .padding(.top, 10)
+                }
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.secondary)
+        }
+        .padding(22)
+        }
+    }
+
+    private var sortedNodes: [RelayCandidate] {
+        model.tailnetNodes.sorted {
+            if $0.selected != $1.selected { return $0.selected }
+            if $0.isSelf != $1.isSelf { return $0.isSelf }
+            if $0.online != $1.online { return $0.online }
+            return $0.nodeName.localizedCaseInsensitiveCompare($1.nodeName) == .orderedAscending
         }
     }
 
@@ -565,90 +594,6 @@ private struct HeaderBar: View {
     }
 }
 
-private struct RelayView: View {
-    @EnvironmentObject private var model: AppModel
-    @State private var showLogs = false
-    @State private var selectedModel: DiscoveredModel?
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                RelayOverviewCard()
-
-                SectionHeader(
-                    title: "设备",
-                    subtitle: "每台设备独立刷新、测试和配置；结果会同步到拓扑配置",
-                    actionTitle: model.isDiscoveringNodes ? "正在扫描" : "扫描全部",
-                    actionSymbol: "arrow.clockwise",
-                    action: model.refreshTailnetNodes
-                )
-
-                VStack(spacing: 8) {
-                    ForEach(sortedNodes) { node in
-                        UnifiedDeviceRow(node: node)
-                    }
-                }
-
-                DisclosureGroup("中转站服务运维") {
-                    ServerControlCard(showLogs: $showLogs)
-                        .padding(.top, 10)
-                }
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-
-                SectionHeader(
-                    title: "模型目录",
-                    subtitle: "\(model.readyAgentCount) 个执行可用 · \(model.partialAgentCount) 个部分兼容 · 未检测项可选择后测试",
-                    actionTitle: model.isDiscovering ? "正在检查" : "检查更新",
-                    actionSymbol: "arrow.triangle.2.circlepath",
-                    action: model.discoverModels
-                )
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    ForEach(model.allDiscoveredModels) { discovered in
-                        RelayModelCard(model: discovered, status: model.registry?.models[discovered.alias])
-                            .contentShape(Rectangle())
-                            .onTapGesture { selectedModel = discovered }
-                    }
-                }
-
-                HStack(spacing: 12) {
-                    Button {
-                        model.isDetecting ? model.cancelDetection() : model.detectModels()
-                    } label: {
-                        Label(model.isDetecting ? "停止检测" : "检测已选 Agent", systemImage: model.isDetecting ? "stop.fill" : "waveform.path.ecg")
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-
-                    Spacer()
-                    if let checked = model.registry?.catalogCheckedAt {
-                        Text("目录更新：\(checked)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if showLogs || model.isDetecting {
-                    ConsolePanel(text: showLogs ? model.gatewayLogs : model.commandLog, title: showLogs ? "中转站日志（已脱敏）" : "模型检测")
-                }
-            }
-            .padding(22)
-        }
-        .sheet(item: $selectedModel) { item in
-            ModelDetailSheet(model: item, status: model.registry?.models[item.alias], checkedAt: model.registry?.checkedAt)
-        }
-    }
-
-    private var sortedNodes: [RelayCandidate] {
-        model.tailnetNodes.sorted {
-            if $0.selected != $1.selected { return $0.selected }
-            if $0.isSelf != $1.isSelf { return $0.isSelf }
-            if $0.online != $1.online { return $0.online }
-            return $0.nodeName.localizedCaseInsensitiveCompare($1.nodeName) == .orderedAscending
-        }
-    }
-}
-
 private struct RelayOverviewCard: View {
     @EnvironmentObject private var model: AppModel
 
@@ -711,6 +656,7 @@ private struct UnifiedDeviceRow: View {
     let node: RelayCandidate
 
     private var test: DeviceConnectivityTest? { model.deviceTests[node.tailscaleIP] }
+    private var status: RemoteClientStatus? { node.clientStatus }
     private var refreshing: Bool { model.refreshingDeviceIDs.contains(node.tailscaleIP) }
     private var testing: Bool { model.testingDeviceIDs.contains(node.tailscaleIP) }
     private var available: Bool { test?.status == "ready" || (test == nil && node.online) }
@@ -728,6 +674,12 @@ private struct UnifiedDeviceRow: View {
             return node.nodeName.contains("bupt")
                 ? "Tailscale 已离线；先通过北邮 VPN 应急入口登录并恢复 Tailscale"
                 : "Tailnet 中未在线，无法从当前 Mac 访问"
+        }
+        if status?.updateAvailable == true {
+            return "PCL Relay \(status?.clientVersion ?? "旧版") → \(status?.expectedClientVersion ?? "最新版")；可一键同步客户端与原生角色"
+        }
+        if status?.clientInstalled == true && status?.nativeRoles == false {
+            return "检测到旧式委派配置；需要升级为 Codex 原生 custom roles"
         }
         if node.isSelf { return "本地 Codex 桌面版与 VS Code 使用当前中转站" }
         if node.feasibility?.localPCLDirectActive == true { return "服务器通过 127.0.0.1 本地适配器直接访问 PCL API" }
@@ -786,8 +738,12 @@ private struct UnifiedDeviceRow: View {
                         .buttonStyle(SecondaryButtonStyle())
                         .disabled(model.isSelectingRelay)
                 } else if !node.isSelf && node.online && node.clientStatus?.ssh == true && node.feasibility?.recommendedRoute != "unavailable" {
-                    Button(node.clientStatus?.ready == true || node.feasibility?.localPCLDirectActive == true ? "重新配置" : "接入") {
-                        model.configureNode(node)
+                    Button(remoteActionTitle) {
+                        if status?.updateAvailable == true {
+                            model.updateRemoteClient(node)
+                        } else {
+                            model.configureNode(node)
+                        }
                     }
                     .buttonStyle(SecondaryButtonStyle())
                     .disabled(model.installingClientTarget != nil)
@@ -824,107 +780,12 @@ private struct UnifiedDeviceRow: View {
         if node.feasibility?.localPCLDirectActive == true { return .cyan }
         return .blue
     }
-}
 
-private struct RelayCandidateCard: View {
-    @EnvironmentObject private var model: AppModel
-    let relay: RelayCandidate
-
-    var body: some View {
-        GlassCard {
-            HStack(spacing: 14) {
-                Image(systemName: relay.selected ? "checkmark.circle.fill" : "server.rack")
-                    .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(relay.selected ? .green : .blue)
-                    .frame(width: 44, height: 44)
-                    .background((relay.selected ? Color.green : Color.blue).opacity(0.11), in: RoundedRectangle(cornerRadius: 11))
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 7) {
-                        Text(relay.nodeName).font(.headline)
-                        if relay.selected { StatusPill(title: "正在使用", active: true, symbol: "checkmark.circle.fill") }
-                        StatusPill(title: relay.pclAuth == "valid" ? "PCL 凭据有效" : "PCL 凭据异常", active: relay.pclAuth == "valid", symbol: "key.fill")
-                    }
-                    Text("\(relay.magicDNS)  ·  \(relay.tailscaleIP):15722  ·  \(relay.modelCount) 个模型")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                Spacer()
-                if let latency = relay.latencyMS {
-                    Text("\(latency) ms").font(.caption).foregroundStyle(.secondary)
-                }
-                Button(relay.selected ? "已选择" : "使用此中转站") { model.selectRelay(relay) }
-                    .buttonStyle(SecondaryButtonStyle())
-                    .disabled(relay.selected || relay.pclAuth != "valid" || model.isSelectingRelay)
-            }
-        }
-    }
-}
-
-private struct RemoteClientCard: View {
-    @EnvironmentObject private var model: AppModel
-    let node: RelayCandidate
-
-    private var status: RemoteClientStatus? { node.clientStatus }
-    private var isLocal: Bool { node.isSelf }
-    private var ready: Bool { isLocal ? model.codexIntegrationReady : (status?.ready == true || node.feasibility?.localPCLDirectActive == true) }
-    private var canInstall: Bool {
-        guard !isLocal, node.online, !(node.sshTarget ?? "").isEmpty, status?.ssh == true, status?.supportedSystem != false else { return false }
-        switch node.feasibility?.recommendedRoute {
-        case "direct": return status?.gatewayReachable == true
-        case "local_pcl_direct": return status?.pclNetworkReachable == true
-        case "bridge_via_local_mac": return node.feasibility?.bridgeViaLocalMac == true
-        default: return false
-        }
-    }
-    private var detail: String {
-        if isLocal { return "当前 Mac · 本地 Codex 桌面版与 VS Code" }
-        if !node.online { return "Tailnet 离线" }
-        if (node.sshTarget ?? "").isEmpty { return "未在 ~/.ssh/config 找到对应主机" }
-        if status?.ssh != true { return "SSH 凭据不可用：\(status?.error ?? "连接失败")" }
-        if status?.supportedSystem == false { return "系统不受支持：\(status?.system ?? "unknown")" }
-        if node.feasibility?.recommendedRoute == "local_pcl_direct" {
-            return ready ? "已通过本机回环适配器直接使用 PCL API" : "可直达 PCL API；推荐本地回环适配器，无需经过 Mac"
-        }
-        if status?.gatewayReachable != true { return node.feasibility?.recommendationReason ?? "远端工作区无法访问当前中转站：\(status?.error ?? "网络不通")" }
-        if ready { return "已配置为 \(status?.gateway ?? "当前中转站")" }
-        return "可以安全接入当前中转站"
-    }
-
-    var body: some View {
-        GlassCard {
-            HStack(spacing: 14) {
-                Image(systemName: (status?.system == "Darwin" || isLocal) ? "laptopcomputer" : "server.rack")
-                    .font(.system(size: 21, weight: .medium))
-                    .foregroundStyle(ready ? .green : (node.online ? .blue : .secondary))
-                    .frame(width: 44, height: 44)
-                    .background((ready ? Color.green : Color.blue).opacity(0.10), in: RoundedRectangle(cornerRadius: 11))
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 7) {
-                        Text(node.nodeName).font(.headline)
-                        StatusPill(title: node.online ? "Tailnet 在线" : "离线", active: node.online, symbol: "circle.fill")
-                        StatusPill(title: ready ? "Codex 已接入" : "未接入", active: ready, symbol: ready ? "checkmark.shield.fill" : "wrench.and.screwdriver.fill")
-                    }
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(status?.gatewayReachable == false && node.online ? .orange : .secondary)
-                        .lineLimit(2)
-                    if !isLocal, let system = status?.system {
-                        Text("\(system) · \(status?.architecture ?? "unknown") · SSH \(node.sshTarget ?? "-")")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                Spacer()
-                if !isLocal {
-                    Button(ready ? "重新配置" : (model.installingClientTarget == node.sshTarget ? "正在配置" : "一键接入")) {
-                        model.configureNode(node)
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
-                    .disabled(!canInstall || model.installingClientTarget != nil)
-                }
-            }
-        }
+    private var remoteActionTitle: String {
+        if model.installingClientTarget == node.sshTarget { return "正在更新" }
+        if status?.updateAvailable == true { return "升级到 \(status?.expectedClientVersion ?? "最新版")" }
+        if status?.ready == true || node.feasibility?.localPCLDirectActive == true { return "重新配置" }
+        return "接入"
     }
 }
 
@@ -994,52 +855,6 @@ private struct ServerControlCard: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(4)
                         .textSelection(.enabled)
-                }
-            }
-        }
-    }
-}
-
-private struct RelayHero: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        GlassCard {
-            HStack(spacing: 18) {
-                ZStack {
-                    Circle().fill(model.relayReady ? Color.green.opacity(0.13) : Color.orange.opacity(0.13))
-                    Circle().stroke(model.relayReady ? Color.green.opacity(0.45) : Color.orange.opacity(0.45), lineWidth: 1)
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                        .font(.system(size: 28, weight: .medium))
-                        .foregroundStyle(model.relayReady ? .green : .orange)
-                }
-                .frame(width: 66, height: 66)
-
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack(spacing: 9) {
-                        Text("PCL Tailnet 中转站")
-                            .font(.system(size: 22, weight: .semibold, design: .rounded))
-                        StatusPill(title: model.relayReady ? "在线" : "待检查", active: model.relayReady, symbol: "circle.fill")
-                    }
-                    Text("把 PCL 内网模型转换成 Codex Responses API，只向你的个人 Tailnet 开放；PCL 登录仅用于申请 API Key。")
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 8) {
-                        Text(model.gatewayURL)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Button("复制") { model.copyGatewayURL() }
-                            .buttonStyle(.borderless)
-                    }
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text("API Key")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Label("仅存跳板机", systemImage: "lock.shield.fill")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.green)
                 }
             }
         }
@@ -1232,18 +1047,57 @@ private struct PortalRouteNode: View {
     }
 }
 
-private struct AgentsView: View {
+private struct ModelsAgentsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedAgent = "pcl_deepseek_pro"
+    @State private var selectedModel: DiscoveredModel?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 AgentFlowCard()
 
+                SectionHeader(
+                    title: "PCL 模型目录",
+                    subtitle: "\(model.readyAgentCount) 个执行可用 · \(model.partialAgentCount) 个部分兼容；点开模型可查看能力详情",
+                    actionTitle: model.isDiscovering ? "正在检查" : "检查更新",
+                    actionSymbol: "arrow.triangle.2.circlepath",
+                    action: model.discoverModels
+                )
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                    ForEach(model.allDiscoveredModels) { discovered in
+                        RelayModelCard(model: discovered, status: model.registry?.models[discovered.alias])
+                            .contentShape(Rectangle())
+                            .onTapGesture { selectedModel = discovered }
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        model.isDetecting ? model.cancelDetection() : model.detectModels()
+                    } label: {
+                        Label(model.isDetecting ? "停止检测" : "检测已选模型", systemImage: model.isDetecting ? "stop.fill" : "waveform.path.ecg")
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+
+                    Spacer()
+                    if let checked = model.registry?.catalogCheckedAt {
+                        Text("目录更新：\(checked)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if model.isDetecting {
+                    ConsolePanel(text: model.commandLog, title: "模型能力检测")
+                }
+
+                Divider().opacity(0.45)
+
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 12) {
-                        SectionHeader(title: "Codex 原生子 Agent", subtitle: "启用后由主 GPT 通过原生 spawn_agent 调用")
+                        SectionHeader(title: "启用为 Codex 子 Agent", subtitle: "同一份模型状态直接用于角色启用，不再在另一页重复选择")
                         ForEach(model.agentOptions) { agent in
                             AgentToggleCard(
                                 agent: agent,
@@ -1261,6 +1115,9 @@ private struct AgentsView: View {
                 }
             }
             .padding(22)
+        }
+        .sheet(item: $selectedModel) { item in
+            ModelDetailSheet(model: item, status: model.registry?.models[item.alias], checkedAt: model.registry?.checkedAt)
         }
         .onChange(of: model.selectedAgents) { _, agents in
             if !agents.contains(selectedAgent), let fallback = model.agentOptions.first(where: { agents.contains($0.id) }) {
@@ -1288,7 +1145,7 @@ private struct AgentFlowCard: View {
                 FlowNode(symbol: "person.3.sequence.fill", title: "原生子 Agent", detail: "过程显示在 Codex", color: .purple)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
-                    StatusPill(title: model.codexIntegrationReady ? "原生 v1 已就绪" : "需要安装", active: model.codexIntegrationReady, symbol: "arrow.triangle.branch")
+                    StatusPill(title: model.codexIntegrationReady ? "原生角色已就绪" : "需要安装", active: model.codexIntegrationReady, symbol: "arrow.triangle.branch")
                     Button(model.codexIntegrationReady ? "修复注册" : "安装到 Codex") {
                         model.installCodexIntegration()
                     }
@@ -1305,6 +1162,10 @@ private struct NativeAgentUsageCard: View {
 
     private var selected: AgentDefinition? {
         model.agentOptions.first { $0.id == selectedAgent }
+    }
+
+    private var nativeRoleName: String {
+        selected?.nativeRoleName ?? selectedAgent.replacingOccurrences(of: "_", with: "-")
     }
 
     var body: some View {
@@ -1330,8 +1191,8 @@ private struct NativeAgentUsageCard: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("示例").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    NativePromptExample(text: "让 \(selectedAgent) 实现这个功能，并运行测试；完成后由你复核。")
-                    NativePromptExample(text: "启动多个 \(selectedAgent) 子 Agent，并行处理边界清晰的子任务。")
+                    NativePromptExample(text: "让 \(nativeRoleName) 实现这个功能，并运行测试；完成后由你复核。")
+                    NativePromptExample(text: "启动多个 \(nativeRoleName) 子 Agent，并行处理边界清晰的子任务。")
                 }
 
                 Divider().opacity(0.35)

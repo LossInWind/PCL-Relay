@@ -93,6 +93,9 @@ class ClientConfigTests(unittest.TestCase):
             self.assertIn('[mcp_servers.pcl_relay]', updated)
             self.assertIn('[agents]', updated)
             self.assertIn('default_subagent_model = "pcl/DeepSeek-V4-Pro"', updated)
+            self.assertIn('[features.multi_agent_v2]', updated)
+            self.assertIn('hide_spawn_agent_metadata = true', updated)
+            self.assertIn('tool_namespace = "agents"', updated)
             self.assertNotIn('[model_providers.pcl_internal]', updated)
             self.assertNotIn('[mcp_servers.pcl_agents]', updated)
             self.assertIn('default_tools_approval_mode = "approve"', updated)
@@ -124,7 +127,7 @@ class ClientConfigTests(unittest.TestCase):
         slugs = {item["slug"] for item in model_catalog()["models"]}
         self.assertEqual(slugs, {info["model"] for info in AGENTS.values()})
 
-    def test_combined_catalog_routes_pcl_and_forces_native_v1(self):
+    def test_combined_catalog_routes_pcl_v2_and_preserves_native_surface(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
@@ -133,7 +136,27 @@ class ClientConfigTests(unittest.TestCase):
         official = [item for item in models if item["slug"].startswith("gpt-")]
         self.assertEqual({item["slug"] for item in pcl}, {"pcl/" + info["model"] for info in AGENTS.values()})
         self.assertTrue(official)
-        self.assertTrue(all(item["multi_agent_version"] == "v1" for item in models))
+        self.assertTrue(all(item["multi_agent_version"] == "v2" for item in pcl))
+        self.assertEqual(official[0]["multi_agent_version"], "v2")
+
+    def test_install_writes_native_custom_roles_without_overwriting_user_role(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            roles = home / "agents"
+            roles.mkdir(parents=True)
+            user_role = roles / "pcl-deepseek-pro.toml"
+            user_role.write_text('name = "pcl-deepseek-pro"\ndescription = "user owned"\n', encoding="utf-8")
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}),
+                mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
+                mock.patch("pcl_codex_bridge.client_config.save_registry"),
+            ):
+                result = install_client_config()
+            self.assertIn('description = "user owned"', user_role.read_text(encoding="utf-8"))
+            generated = {item["name"]: Path(item["path"]) for item in result["native_roles"]}
+            self.assertIn("pcl-relay-deepseek-pro", generated)
+            self.assertIn('model = "pcl/DeepSeek-V4-Pro"', generated["pcl-relay-deepseek-pro"].read_text(encoding="utf-8"))
+            self.assertIn("never fall back to pcl_delegate", generated["pcl-relay-deepseek-pro"].read_text(encoding="utf-8"))
 
     def test_standalone_mcp_block_uses_bundled_cli(self):
         block = managed_block("http://tailnet:15722/v1", "/Users/test/.local/bin/pcl-codex", True)
@@ -145,6 +168,24 @@ class ClientConfigTests(unittest.TestCase):
         block = managed_block("http://tailnet:15722/v1", "/usr/bin/python3", False)
         self.assertIn('args = ["-m", "pcl_codex_bridge.mcp_server"]', block)
         self.assertIn("PYTHONPATH", block)
+
+    def test_existing_v2_table_is_preserved_without_duplicate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            config = home / "config.toml"
+            config.write_text(
+                '[features.multi_agent_v2]\nenabled = true\nhide_spawn_agent_metadata = true\ntool_namespace = "agents"\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}),
+                mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
+                mock.patch("pcl_codex_bridge.client_config.save_registry"),
+            ):
+                install_client_config()
+            updated = config.read_text(encoding="utf-8")
+            self.assertEqual(updated.count("[features.multi_agent_v2]"), 1)
 
 
 if __name__ == "__main__":

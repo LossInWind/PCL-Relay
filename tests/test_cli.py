@@ -39,7 +39,7 @@ class CliTests(unittest.TestCase):
                 catalog = json.loads((Path(temp) / "pcl-native-models.json").read_text())
         self.assertEqual(result["selected_agents"], ["pcl_qwen3_6_35b"])
         self.assertEqual(catalog["models"][0]["slug"], "pcl/Qwen3.6-35B")
-        self.assertEqual(catalog["models"][0]["multi_agent_version"], "v1")
+        self.assertEqual(catalog["models"][0]["multi_agent_version"], "v2")
         self.assertEqual(save.call_args.args[0]["agent_definitions"]["pcl_qwen3_6_35b"]["model"], "Qwen3.6-35B")
 
     def test_select_rejects_non_agent_model(self):

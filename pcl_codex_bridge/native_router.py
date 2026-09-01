@@ -17,7 +17,7 @@ from .zstd_codec import decompress as zstd_decompress
 
 
 SERVICE_NAME = "pcl-relay-native-router"
-SERVICE_VERSION = "2.0.0"
+SERVICE_VERSION = "2.1.0"
 DEFAULT_PORT = 15724
 PCL_MODEL_PREFIX = "pcl/"
 OPENAI_CODEX_BASE_URL = os.environ.get(
@@ -97,6 +97,63 @@ def rewrite_pcl_body(payload: Dict[str, Any], upstream_model: str) -> bytes:
     return json.dumps(rewritten, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def make_v2_agent_messages_plaintext(payload: Dict[str, Any]) -> int:
+    """Remove only the cross-provider task encryption marker from agents.*.
+
+    Codex V2 normally asks the official backend to encrypt collaboration
+    ``message`` arguments. A PCL child cannot decrypt that OpenAI-owned
+    envelope. The non-reserved ``agents`` namespace is selected by our managed
+    config, so it is safe to request plaintext function arguments there.
+    Reserved ``collaboration`` schemas and reasoning ``encrypted_content`` are
+    deliberately untouched.
+    """
+
+    def rewrite_tools(tools: Any, inside_agents: bool = False) -> int:
+        if not isinstance(tools, list):
+            return 0
+        changed = 0
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("type") == "namespace":
+                if str(tool.get("name") or "").lower() != "agents":
+                    continue
+                children = tool.get("tools")
+                if not isinstance(children, list):
+                    children = tool.get("children")
+                changed += rewrite_tools(children, True)
+                continue
+            if tool.get("type") != "function":
+                continue
+            explicit_agents = str(tool.get("namespace") or "").lower() == "agents"
+            if not inside_agents and not explicit_agents:
+                continue
+            if tool.get("name") not in {"spawn_agent", "send_message", "followup_task"}:
+                continue
+            parameters = tool.get("parameters")
+            properties = parameters.get("properties") if isinstance(parameters, dict) else None
+            message = properties.get("message") if isinstance(properties, dict) else None
+            if isinstance(message, dict) and "encrypted" in message:
+                message.pop("encrypted", None)
+                changed += 1
+        return changed
+
+    changed = rewrite_tools(payload.get("tools"))
+    inputs = payload.get("input")
+    if isinstance(inputs, list):
+        for item in inputs:
+            if isinstance(item, dict) and item.get("type") == "additional_tools":
+                changed += rewrite_tools(item.get("tools"))
+    return changed
+
+
+def rewrite_official_body(payload: Dict[str, Any], decoded: bytes) -> bytes:
+    """Prepare official requests without changing their bytes unnecessarily."""
+    if make_v2_agent_messages_plaintext(payload) == 0:
+        return decoded
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def official_proxy_url() -> str:
     return os.environ.get("PCL_RELAY_OFFICIAL_PROXY", "").strip()
 
@@ -115,7 +172,7 @@ def opener_for(route: str) -> urllib.request.OpenerDirector:
 
 
 def upstream_url(route: str, request_path: str) -> str:
-    path = request_path.split("?", 1)[0]
+    path, separator, query = request_path.partition("?")
     if not path.startswith("/v1/"):
         raise ValueError(f"Unsupported data-plane path: {path}")
     suffix = path[len("/v1") :]
@@ -126,12 +183,31 @@ def upstream_url(route: str, request_path: str) -> str:
     allowed = {
         "/responses",
         "/responses/compact",
+        # Codex executes its built-in search client-side against the configured
+        # base URL.  This endpoint is private to the authenticated ChatGPT
+        # Codex backend, so it must always stay on the official trust route.
+        "/alpha/search",
         "/images/generations",
         "/images/edits",
     }
     if suffix not in allowed:
         raise ValueError(f"Official Codex route does not support {suffix}")
-    return OPENAI_CODEX_BASE_URL + suffix
+    target = OPENAI_CODEX_BASE_URL + suffix
+    return target + (separator + query if separator else "")
+
+
+def route_for_path(payload: Dict[str, Any], request_path: str) -> Tuple[str, str]:
+    """Choose a trust route before inspecting a possibly routed model id.
+
+    Search and image endpoints are Codex-hosted sidecars.  They are not PCL
+    inference requests even when their JSON body happens to mention a PCL
+    model, and forwarding them to the Tailnet gateway would either reject the
+    request or leak the caller's ChatGPT request shape into the wrong domain.
+    """
+    path = request_path.split("?", 1)[0]
+    if path in {"/v1/alpha/search", "/v1/images/generations", "/v1/images/edits"}:
+        return "openai", str(payload.get("model") or "")
+    return route_request(payload)
 
 
 def outbound_headers(
@@ -172,7 +248,7 @@ def _public_response_headers(headers: Any) -> Dict[str, str]:
 
 class NativeRouterHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "PCLRelayNativeRouter/0.2"
+    server_version = "PCLRelayNativeRouter/2.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(
@@ -229,7 +305,7 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
                     "gateway_reachable": gateway_ok,
                     "gateway_error": error,
                     "official_route": "chatgpt-forward",
-                    "multi_agent_surface": "v1",
+                    "multi_agent_surface": "v2_custom_roles",
                 },
             )
             return
@@ -265,8 +341,8 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
                 raise ValueError("Invalid or oversized request body")
             raw = self.rfile.read(length)
             payload, decoded = decode_request_body(raw, self.headers.get("Content-Encoding", ""))
-            route, model = route_request(payload)
-            body = rewrite_pcl_body(payload, model) if route == "pcl" else decoded
+            route, model = route_for_path(payload, self.path)
+            body = rewrite_pcl_body(payload, model) if route == "pcl" else rewrite_official_body(payload, decoded)
             target = upstream_url(route, self.path)
             request = urllib.request.Request(
                 target,

@@ -13,6 +13,8 @@ public struct DoctorStatus: Codable, Equatable, Sendable {
     public let nativeRouter: Bool?
     public let nativeCatalog: Bool?
     public let nativeV1: Bool?
+    public let nativeV2: Bool?
+    public let nativeRoles: Bool?
     public let managementMCP: Bool?
     public let legacyDelegateMCP: Bool?
     public let delegation: String?
@@ -27,6 +29,8 @@ public struct DoctorStatus: Codable, Equatable, Sendable {
         case nativeRouter = "native_router"
         case nativeCatalog = "native_catalog"
         case nativeV1 = "native_v1"
+        case nativeV2 = "native_v2"
+        case nativeRoles = "native_roles"
         case managementMCP = "management_mcp"
         case legacyDelegateMCP = "legacy_delegate_mcp"
         case multiAgentSurface = "multi_agent_surface"
@@ -149,6 +153,12 @@ public struct RemoteClientStatus: Codable, Equatable, Sendable {
     public let configManaged: Bool?
     public let clientInstalled: Bool?
     public let nativeV1: Bool?
+    public let nativeV2: Bool?
+    public let nativeRoles: Bool?
+    public let nativeRoleNames: [String]?
+    public let clientVersion: String?
+    public let expectedClientVersion: String?
+    public let updateAvailable: Bool?
     public let nativeRouterPort: Int?
     public let nativeRouterReachable: Bool?
     public let nativeRouterGatewayReachable: Bool?
@@ -176,6 +186,12 @@ public struct RemoteClientStatus: Codable, Equatable, Sendable {
         case configManaged = "config_managed"
         case clientInstalled = "client_installed"
         case nativeV1 = "native_v1"
+        case nativeV2 = "native_v2"
+        case nativeRoles = "native_roles"
+        case nativeRoleNames = "native_role_names"
+        case clientVersion = "client_version"
+        case expectedClientVersion = "expected_client_version"
+        case updateAvailable = "update_available"
         case nativeRouterPort = "native_router_port"
         case nativeRouterReachable = "native_router_reachable"
         case nativeRouterGatewayReachable = "native_router_gateway_reachable"

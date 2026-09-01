@@ -7,7 +7,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(names, {"pcl_models", "pcl_native_status"})
         self.assertNotIn("pcl_delegate", names)
         descriptions = " ".join(tool["description"] for tool in tools())
-        self.assertIn("pcl_deepseek_pro=pcl/DeepSeek-V4-Pro", descriptions)
+        self.assertIn("pcl-deepseek-pro=pcl/DeepSeek-V4-Pro", descriptions)
 
 
 if __name__ == "__main__":

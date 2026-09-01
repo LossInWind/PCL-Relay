@@ -447,6 +447,9 @@ def parser() -> argparse.ArgumentParser:
     client_install = client_actions.add_parser("install")
     client_install.add_argument("ssh_target")
     client_install.set_defaults(handler=lambda a: install_remote_client(a.ssh_target, a.gateway_url))
+    client_update = client_actions.add_parser("update")
+    client_update.add_argument("ssh_target")
+    client_update.set_defaults(handler=lambda a: install_remote_client(a.ssh_target, a.gateway_url))
 
     bridges = commands.add_parser("bridges")
     bridge_actions = bridges.add_subparsers(dest="bridges_action", required=True)

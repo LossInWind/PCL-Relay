@@ -20,12 +20,13 @@ PCL Relay 本机回环路由（仅 127.0.0.1）
 ChatGPT Codex 后端       Tailnet 中转站:15722 -> PCL API
                                  |
                                  v
-                      Codex 原生 v1 spawn_agent
+                      Codex 原生 custom role + spawn_agent
 ```
 
 - 官方 GPT 仍使用原来的 `openai` provider、登录状态和模型名称；请求由应用内置路由安全透传。
 - PCL 模型使用 `pcl/DeepSeek-V4-Pro` 等带命名空间的模型 ID，避免误发到官方服务。
-- 每个模型目录项固定使用 Codex 原生 multi-agent v1。主 GPT 调用 PCL 子 Agent 时，创建、进度和结果显示在 Codex 自己的任务界面中。
+- PCL 模型写入 Codex 原生 multi-agent v2 目录，并同步为 `~/.codex/agents/*.toml` custom roles。主 GPT 通过原生 `spawn_agent`/角色调用，创建、进度和结果显示在 Codex 自己的任务界面中。
+- 混合 provider 使用非保留的 `agents` V2 协作命名空间；路由只取消任务正文的 OpenAI 私有加密标记，保留官方 reasoning 密文与登录边界，因此 PCL 子 Agent 能读懂父任务。
 - 子 Agent 自动继承当前 Codex / VS Code 工作区，无需在 PCL Relay 中再选择目录。
 - MCP 只保留模型发现和健康状态，不执行任务，也不再启动外部 `codex exec`。
 
@@ -33,12 +34,11 @@ PCL API Key 默认只保存在所选中转站的 `~/.config/pcl-codex-bridge/api
 
 ## 可视化应用
 
-macOS 的 **PCL Relay.app** 包含四个联动页面：
+macOS 的 **PCL Relay.app** 按用户任务收成三个联动页面：
 
-- **拓扑配置**：发现 Tailnet 设备、检测直连/桥接/PCL 本地直连能力，推荐并应用最简单的可用拓扑。
-- **中转站**：选择当前 PCL 中转站，查看网关状态、服务日志、模型目录，并给其他 macOS/Linux 设备一键安装同一客户端。
-- **PCL 门户**：通过当前中转站在隔离的浏览器资料中访问 API 广场、模型、钱包和 Key 页面；不修改 macOS 全局代理。
-- **子 Agent**：选择允许 Codex 调用的 PCL 文本模型，查看对话、流式与工具能力，并安装/修复原生 v1 集成。
+- **网络**：统一拓扑规划、设备连通性、当前中转站运维，以及其他 macOS/Linux 设备的一键安装与升级。
+- **模型与 Agent**：统一模型目录、对话/流式/工具能力检测、启用角色和 Codex 使用提示。
+- **PCL 门户**：只负责通过当前中转站打开 API 广场、用量和 Key 页面；使用隔离浏览器资料，不修改 macOS 全局代理。
 
 Embedding、重排序、语音、OCR 和图像模型可以在模型目录中查看，但不会被误注册成代码子 Agent。
 
@@ -56,17 +56,17 @@ open -a "PCL Relay"
 安装后新建 Codex 任务或重新加载 VS Code 窗口，然后直接说：
 
 ```text
-让 pcl_deepseek_pro 在当前项目实现这个功能并运行测试，完成后由你复核。
-让 pcl_glm 和 pcl_kimi 分别审查这个方案，再由你整合结论。
-启动多个 pcl_deepseek_flash 子 Agent，并行处理这些边界清晰的修改。
+让 pcl-deepseek-pro 在当前项目实现这个功能并运行测试，完成后由你复核。
+让 pcl-glm 和 pcl-kimi 分别审查这个方案，再由你整合结论。
+启动多个 pcl-deepseek-flash 子 Agent，并行处理这些边界清晰的修改。
 ```
 
 默认别名：
 
-- `pcl_deepseek_pro` → `pcl/DeepSeek-V4-Pro`
-- `pcl_deepseek_flash` → `pcl/DeepSeek-V4-Flash-0731`
-- `pcl_glm` → `pcl/GLM-5.2`
-- `pcl_kimi` → `pcl/Kimi-K3`
+- `pcl-deepseek-pro` → `pcl/DeepSeek-V4-Pro`
+- `pcl-deepseek-flash` → `pcl/DeepSeek-V4-Flash-0731`
+- `pcl-glm` → `pcl/GLM-5.2`
+- `pcl-kimi` → `pcl/Kimi-K3`
 
 模型可通过“检查更新”发现并按需启用。只有通过文本 Agent 资格检查的模型才会写入 Codex 子 Agent 目录。
 
@@ -110,4 +110,4 @@ python3 -m pytest -q
 swift test --package-path macos
 ```
 
-Responses 转换参考了 MIT 许可的 [`codex-deepseek-proxy`](https://github.com/himmetozcan/codex-deepseek-proxy)。本应用的主要结构是“PCL Tailnet 中转站 + 内嵌 OpenCodex 能力”：统一模型目录、官方透传和原生 v1 子 Agent 路由主要参考并迁移自 MIT 许可的 [`OpenCodex`](https://github.com/lidge-jun/opencodex)。[`BigStrongSun/ccswitchmulti`](https://github.com/BigStrongSun/ccswitchmulti) 用于交叉检查 zstd、WebSocket 回退和 spawn-agent 模型优先级等兼容细节。运行时不依赖这些项目，也不会安装第二个应用。详见 `NOTICE`。
+Responses 转换参考了 MIT 许可的 [`codex-deepseek-proxy`](https://github.com/himmetozcan/codex-deepseek-proxy)。本应用的主要结构是“PCL Tailnet 中转站 + 内嵌 OpenCodex 能力”：统一模型目录、官方透传、`/alpha/search` 官方旁路和原生子 Agent 路由主要参考并迁移自 MIT 许可的 [`OpenCodex`](https://github.com/lidge-jun/opencodex)。[`BigStrongSun/ccswitchmulti`](https://github.com/BigStrongSun/ccswitchmulti) 用于交叉检查 zstd、WebSocket 回退、custom role 和 spawn-agent 模型优先级等兼容细节。运行时不依赖这些项目，也不会安装第二个应用。详见 `NOTICE`。

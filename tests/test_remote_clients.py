@@ -20,7 +20,12 @@ class RemoteClientTests(unittest.TestCase):
             "supported_system": True,
             "config_managed": True,
             "client_installed": True,
-            "native_v1": True,
+            "native_v1": False,
+            "native_v2": True,
+            "native_roles": True,
+            "client_version": "2.1.0",
+            "expected_client_version": "2.1.0",
+            "update_available": False,
             "native_router_reachable": True,
             "native_router_gateway_reachable": True,
             "gateway": "http://relay.tail.test:15722/v1",
@@ -40,7 +45,12 @@ class RemoteClientTests(unittest.TestCase):
             "supported_system": False,
             "config_managed": True,
             "client_installed": True,
-            "native_v1": True,
+            "native_v1": False,
+            "native_v2": True,
+            "native_roles": True,
+            "client_version": "2.1.0",
+            "expected_client_version": "2.1.0",
+            "update_available": False,
             "native_router_reachable": True,
             "native_router_gateway_reachable": True,
             "gateway": "http://relay.tail.test:15722/v1",
@@ -50,6 +60,29 @@ class RemoteClientTests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, json.dumps(payload).encode(), b"")
         with mock.patch("pcl_codex_bridge.remote_clients._run_remote_python", return_value=completed):
             result = remote_client_status("unsupported", payload["gateway"])
+        self.assertFalse(result["ready"])
+
+    def test_remote_status_marks_old_client_for_update(self):
+        payload = {
+            "system": "Linux",
+            "supported_system": True,
+            "config_managed": True,
+            "client_installed": True,
+            "client_version": "2.0.0",
+            "expected_client_version": "2.1.0",
+            "update_available": True,
+            "native_v2": True,
+            "native_roles": True,
+            "native_router_reachable": True,
+            "native_router_gateway_reachable": True,
+            "gateway": "http://relay.tail.test:15722/v1",
+            "gateway_reachable": True,
+            "error": "",
+        }
+        completed = subprocess.CompletedProcess([], 0, json.dumps(payload).encode(), b"")
+        with mock.patch("pcl_codex_bridge.remote_clients._run_remote_python", return_value=completed):
+            result = remote_client_status("old-linux", payload["gateway"])
+        self.assertTrue(result["update_available"])
         self.assertFalse(result["ready"])
 
     def test_management_ssh_disables_all_configured_forwardings(self):

@@ -16,6 +16,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from . import __version__
 from .models import (
     AGENTS,
     DEFAULT_GATEWAY_URL,
@@ -24,6 +25,7 @@ from .models import (
     configured_agents,
     load_registry,
     model_catalog,
+    model_details,
     save_registry,
 )
 from .native_router import DEFAULT_PORT as NATIVE_ROUTER_DEFAULT_PORT
@@ -43,6 +45,7 @@ NATIVE_BASE_CATALOG_NAME = "pcl-native-base-models.json"
 NATIVE_STATE_ROOT = Path.home() / ".local" / "state" / "pcl-codex-bridge"
 NATIVE_LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "cn.haichen.pcl-relay-router.plist"
 NATIVE_SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / "pcl-relay-router.service"
+AGENT_ROLE_MARKER = "# >>> pcl-relay managed native agent role v2 >>>"
 TAILSCALE_CANDIDATES = (
     Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
     Path.home() / "Applications" / "Tailscale.app" / "Contents" / "MacOS" / "Tailscale",
@@ -95,6 +98,7 @@ def install_source_tree(source_root: Optional[Path] = None) -> Path:
         shutil.copy2(license_source, INSTALL_ROOT / "LICENSE")
     if notice_source.exists():
         shutil.copy2(notice_source, INSTALL_ROOT / "NOTICE")
+    (INSTALL_ROOT / "VERSION").write_text(__version__ + "\n", encoding="utf-8")
     zstd_source = zstd_library_source()
     if zstd_source is not None:
         zstd_target = INSTALL_ROOT / "lib" / ("libzstd.1.dylib" if sys.platform == "darwin" else "libzstd.so.1")
@@ -122,11 +126,12 @@ def managed_block(
     executable: str,
     standalone: bool = False,
     include_agents_table: bool = True,
+    include_v2_table: bool = True,
 ) -> str:
     """Return the non-root TOML owned by PCL Relay.
 
     Delegation is intentionally absent: MCP exposes only management/status.
-    PCL execution uses Codex's native v1 ``spawn_agent`` surface.
+    PCL execution uses Codex's native custom-role ``spawn_agent`` surface.
     """
     mcp_module_root = str(INSTALL_ROOT)
     args = '["mcp-server"]' if standalone else '["-m", "pcl_codex_bridge.mcp_server"]'
@@ -156,6 +161,15 @@ def managed_block(
             "enabled = true",
             f"default_subagent_model = {json.dumps(PCL_MODEL_PREFIX + default)}",
             'default_subagent_reasoning_effort = "high"',
+        ]
+    if include_v2_table:
+        insert_at = lines.index(END)
+        lines[insert_at:insert_at] = [
+            "",
+            "[features.multi_agent_v2]",
+            "enabled = true",
+            "hide_spawn_agent_metadata = true",
+            'tool_namespace = "agents"',
         ]
     return "\n".join(lines)
 
@@ -198,6 +212,78 @@ def _native_catalog_path() -> Path:
     return codex_home() / NATIVE_CATALOG_NAME
 
 
+def _native_agents_dir() -> Path:
+    return codex_home() / "agents"
+
+
+def _agent_role_name(alias: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "-", alias.lower()).strip("-")
+    if value.startswith("pcl-"):
+        return value
+    if value.startswith("pcl_"):
+        value = "pcl-" + value[4:]
+    return value or "pcl-worker"
+
+
+def _agent_role_text(role: str, model: str, description: str) -> str:
+    instructions = (
+        f"You are the PCL Relay native Codex subagent `{role}`, pinned to `{PCL_MODEL_PREFIX + model}`. "
+        "Stay within the delegated boundary, use the current parent workspace, and report concrete file paths, commands, and verification results. "
+        "Preserve unrelated user changes and return risky or cross-boundary decisions to the parent agent. "
+        "Repository reading, local document search, code search, edits, builds, and tests are allowed when the parent task permits them; never fall back to pcl_delegate."
+    )
+    return "\n".join(
+        [
+            AGENT_ROLE_MARKER,
+            f"name = {json.dumps(role)}",
+            f"description = {json.dumps(description)}",
+            f"developer_instructions = {json.dumps(instructions)}",
+            f"model = {json.dumps(PCL_MODEL_PREFIX + model)}",
+            'model_reasoning_effort = "high"',
+            'sandbox_mode = "workspace-write"',
+            "",
+        ]
+    )
+
+
+def write_native_agent_roles(registry: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
+    """Project selected PCL models into Codex-native custom agent roles.
+
+    Only files with our first-line marker are updated or removed.  A user-owned
+    same-name role is preserved and receives a namespaced PCL Relay sibling.
+    """
+    directory = _native_agents_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    desired_paths = set()
+    roles: List[Dict[str, str]] = []
+    for alias, info in configured_agents(registry).items():
+        model = str(info["model"])
+        description = str(info.get("description") or model_details(model)["description"])
+        base_role = _agent_role_name(alias)
+        path = directory / f"{base_role}.toml"
+        if path.exists() and not path.read_text(encoding="utf-8", errors="replace").startswith(AGENT_ROLE_MARKER + "\n"):
+            base_role = "pcl-relay-" + base_role.removeprefix("pcl-")
+            path = directory / f"{base_role}.toml"
+            if path.exists() and not path.read_text(encoding="utf-8", errors="replace").startswith(AGENT_ROLE_MARKER + "\n"):
+                continue
+        content = _agent_role_text(base_role, model, description)
+        if not path.exists() or path.read_text(encoding="utf-8", errors="replace") != content:
+            path.write_text(content, encoding="utf-8")
+        desired_paths.add(path)
+        roles.append({"name": base_role, "model": PCL_MODEL_PREFIX + model, "path": str(path)})
+
+    for path in directory.glob("*.toml"):
+        if path in desired_paths:
+            continue
+        try:
+            managed = path.read_text(encoding="utf-8", errors="replace").startswith(AGENT_ROLE_MARKER + "\n")
+        except OSError:
+            managed = False
+        if managed:
+            path.unlink()
+    return roles
+
+
 def _catalog_models(path: Path) -> List[Dict[str, Any]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -220,6 +306,10 @@ def _fallback_native_catalog() -> List[Dict[str, Any]]:
     entries = model_catalog(definitions)["models"]
     for item in entries:
         item["display_name"] = str(item["slug"]).replace("gpt-", "GPT-").replace("codex-", "Codex ").title()
+        if item["slug"] in {"gpt-5.6-sol", "gpt-5.6-terra"}:
+            item["multi_agent_version"] = "v2"
+        elif item["slug"] == "gpt-5.6-luna":
+            item["multi_agent_version"] = "v1"
         item["node_repl_disabled"] = False
         item["include_skills_usage_instructions"] = True
         item["include_plugin_usage_instructions"] = True
@@ -250,7 +340,7 @@ def combined_catalog(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any
         routed["slug"] = PCL_MODEL_PREFIX + str(item["slug"])
         routed["display_name"] = "PCL · " + str(item.get("display_name") or item["slug"])
         routed["priority"] = priority
-        routed["multi_agent_version"] = "v1"
+        routed["multi_agent_version"] = "v2"
         routed["supports_websockets"] = False
         routed["supports_search_tool"] = True
         routed["tool_mode"] = "code_mode_only"
@@ -258,7 +348,6 @@ def combined_catalog(registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     native_priority = len(combined) + 1
     for offset, item in enumerate(native_base_catalog()):
         native = dict(item)
-        native["multi_agent_version"] = "v1"
         # The integrated loopback router is HTTP/SSE only.  Disabling the
         # optimistic websocket prewarm prevents five avoidable retries before
         # Codex falls back to the supported transport.
@@ -287,7 +376,7 @@ def backup(path: Path) -> Optional[Path]:
 def install_client_config(
     gateway_url: str = DEFAULT_GATEWAY_URL,
     router_port: Optional[int] = None,
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     legacy_isolated_home = INSTALL_ROOT / "agent-codex-home"
     if legacy_isolated_home.exists():
         shutil.rmtree(legacy_isolated_home)
@@ -308,13 +397,16 @@ def install_client_config(
     registry["native_router_port"] = port
     save_registry(registry)
     catalog = write_native_catalog(registry)
+    roles = write_native_agent_roles(registry)
     standalone = bool(getattr(sys, "frozen", False))
     has_agents_table = bool(re.search(r"(?m)^\s*\[agents\]\s*(?:#.*)?$", base))
+    has_v2_table = bool(re.search(r"(?m)^\s*\[features\.multi_agent_v2\]\s*(?:#.*)?$", base))
     block = managed_block(
         gateway_url,
         str(BIN_PATH) if standalone else sys.executable,
         standalone,
         include_agents_table=not has_agents_table,
+        include_v2_table=not has_v2_table,
     )
     updated = native_root_block(port, catalog) + "\n\n" + base.strip() + "\n\n" + block + "\n"
     backup_path = backup(config) if updated != original else None
@@ -330,8 +422,9 @@ def install_client_config(
         "config": str(config),
         "catalog": str(catalog),
         "router": f"http://127.0.0.1:{port}/v1",
-        "multi_agent_surface": "v1",
+        "multi_agent_surface": "v2_custom_roles",
         "delegation": "native_spawn_agent",
+        "native_roles": roles,
         "backup": str(backup_path) if backup_path else "",
     }
 
@@ -358,6 +451,16 @@ def uninstall_client_config() -> Dict[str, Any]:
         if path.exists():
             path.unlink()
             removed.append(str(path))
+    roles_dir = _native_agents_dir()
+    if roles_dir.exists():
+        for path in roles_dir.glob("*.toml"):
+            try:
+                managed = path.read_text(encoding="utf-8", errors="replace").startswith(AGENT_ROLE_MARKER + "\n")
+            except OSError:
+                managed = False
+            if managed:
+                path.unlink()
+                removed.append(str(path))
     return {"config_changed": changed, "backup": str(backup_path or ""), "removed": removed}
 
 
@@ -1076,10 +1179,12 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
         "native_router": False,
         "native_catalog": _native_catalog_path().exists(),
         "native_v1": False,
+        "native_v2": False,
+        "native_roles": False,
         "management_mcp": False,
         "legacy_delegate_mcp": False,
         "delegation": "native_spawn_agent",
-        "multi_agent_surface": "v1",
+        "multi_agent_surface": "v2_custom_roles",
         "native_router_port": int(load_registry().get("native_router_port") or NATIVE_ROUTER_DEFAULT_PORT),
         "registry": (Path.home() / ".config" / "pcl-codex-bridge" / "models.json").exists(),
         "unsandboxed_fallback": UNSANDBOXED_MARKER.exists(),
@@ -1088,13 +1193,35 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
         text = config.read_text(encoding="utf-8", errors="replace")
         root_managed = ROOT_BEGIN in text and ROOT_END in text
         management_mcp = BEGIN in text and END in text and "[mcp_servers.pcl_relay]" in text
-        global_v2 = bool(re.search(r"(?ms)^\s*\[features\].*?^\s*multi_agent_v2\s*=\s*true\s*$", text))
         catalog_entries = _catalog_models(_native_catalog_path())
         pcl_entries = [item for item in catalog_entries if str(item.get("slug", "")).startswith(PCL_MODEL_PREFIX)]
-        native_v1 = bool(pcl_entries) and all(item.get("multi_agent_version") == "v1" for item in pcl_entries) and not global_v2
+        v2_match = re.search(
+            r"(?ms)^\s*\[features\.multi_agent_v2\]\s*(?:#.*)?$\n(.*?)(?=^\s*\[|\Z)",
+            text,
+        )
+        v2_body = v2_match.group(1) if v2_match else ""
+        v2_transport = all(
+            re.search(pattern, v2_body)
+            for pattern in (
+                r"(?m)^\s*enabled\s*=\s*true\s*(?:#.*)?$",
+                r"(?m)^\s*hide_spawn_agent_metadata\s*=\s*true\s*(?:#.*)?$",
+                r'(?m)^\s*tool_namespace\s*=\s*"agents"\s*(?:#.*)?$',
+            )
+        )
+        native_v2 = bool(pcl_entries) and all(item.get("multi_agent_version") == "v2" for item in pcl_entries) and v2_transport
+        selected = configured_agents()
+        managed_roles = []
+        if _native_agents_dir().exists():
+            managed_roles = [
+                path
+                for path in _native_agents_dir().glob("*.toml")
+                if path.read_text(encoding="utf-8", errors="replace").startswith(AGENT_ROLE_MARKER + "\n")
+            ]
         result["config_managed"] = root_managed and management_mcp
         result["management_mcp"] = management_mcp
-        result["native_v1"] = native_v1
+        result["native_v1"] = False
+        result["native_v2"] = native_v2
+        result["native_roles"] = len(managed_roles) == len(selected) and bool(selected)
         result["legacy_delegate_mcp"] = "[mcp_servers.pcl_agents]" in text or "[model_providers.pcl_internal]" in text
     router = native_router_health(result["native_router_port"])
     result["native_router"] = bool(router.get("reachable"))

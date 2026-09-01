@@ -28,6 +28,60 @@ class NativeRouterTests(unittest.TestCase):
         self.assertEqual(payload["input"], "hello")
         self.assertNotIn("service_tier", payload)
 
+    def test_agents_v2_messages_are_plaintext_without_touching_reserved_or_private_fields(self):
+        payload = {
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "agents",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "spawn_agent",
+                            "parameters": {
+                                "properties": {
+                                    "message": {"type": "string", "encrypted": True},
+                                    "private_note": {"type": "string", "encrypted": True},
+                                }
+                            },
+                        },
+                        {
+                            "type": "function",
+                            "name": "unknown_tool",
+                            "parameters": {"properties": {"message": {"encrypted": True}}},
+                        },
+                    ],
+                },
+                {
+                    "type": "function",
+                    "namespace": "collaboration",
+                    "name": "spawn_agent",
+                    "parameters": {"properties": {"message": {"encrypted": True}}},
+                },
+            ],
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "namespace": "agents",
+                            "name": "followup_task",
+                            "parameters": {"properties": {"message": {"encrypted": True}}},
+                        }
+                    ],
+                },
+                {"type": "reasoning", "encrypted_content": "opaque"},
+            ],
+        }
+        self.assertEqual(native_router.make_v2_agent_messages_plaintext(payload), 2)
+        self.assertNotIn("encrypted", payload["tools"][0]["tools"][0]["parameters"]["properties"]["message"])
+        self.assertTrue(payload["tools"][0]["tools"][0]["parameters"]["properties"]["private_note"]["encrypted"])
+        self.assertTrue(payload["tools"][0]["tools"][1]["parameters"]["properties"]["message"]["encrypted"])
+        self.assertTrue(payload["tools"][1]["parameters"]["properties"]["message"]["encrypted"])
+        self.assertNotIn("encrypted", payload["input"][0]["tools"][0]["parameters"]["properties"]["message"])
+        self.assertEqual(payload["input"][1]["encrypted_content"], "opaque")
+
     def test_decodes_codex_zstd_request_body(self):
         compressed = base64.b64decode(
             "KLUv/QRYQQEAeyJtb2RlbCI6ImdwdC01LjYtbHVuYSIsImlucHV0IjoiaGVsbG8ifYWauCI="
@@ -60,6 +114,22 @@ class NativeRouterTests(unittest.TestCase):
             native_router.upstream_url("openai", "/v1/responses"),
             native_router.OPENAI_CODEX_BASE_URL + "/responses",
         )
+
+    def test_alpha_search_always_uses_official_route_and_preserves_query(self):
+        route, model = native_router.route_for_path(
+            {"model": "pcl/DeepSeek-V4-Pro", "query": "Codex docs"},
+            "/v1/alpha/search?source=codex",
+        )
+        self.assertEqual(route, "openai")
+        self.assertEqual(model, "pcl/DeepSeek-V4-Pro")
+        self.assertEqual(
+            native_router.upstream_url(route, "/v1/alpha/search?source=codex"),
+            native_router.OPENAI_CODEX_BASE_URL + "/alpha/search?source=codex",
+        )
+
+    def test_pcl_cannot_receive_hosted_search(self):
+        with self.assertRaisesRegex(ValueError, "do not support /alpha/search"):
+            native_router.upstream_url("pcl", "/v1/alpha/search")
 
     def test_websocket_probe_gets_clean_http_fallback_signal(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), native_router.NativeRouterHandler)

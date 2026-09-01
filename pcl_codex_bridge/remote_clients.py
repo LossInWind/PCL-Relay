@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from . import __version__
 from .client_config import discover_relays, request_json
 from .models import DEFAULT_GATEWAY_URL, load_registry
 
@@ -130,7 +131,22 @@ import json, os, pathlib, platform, shutil, subprocess, sys, time, urllib.error,
 home = pathlib.Path.home()
 config = home / ".codex" / "config.toml"
 registry_path = home / ".config" / "pcl-codex-bridge" / "models.json"
+version_path = home / ".local" / "share" / "pcl-codex-bridge" / "VERSION"
 text = config.read_text(encoding="utf-8", errors="replace") if config.exists() else ""
+try:
+    client_version = version_path.read_text(encoding="utf-8").strip()
+except Exception:
+    client_version = "legacy" if (home / ".local" / "bin" / "pcl-codex").exists() else ""
+expected_client_version = os.environ.get("PCL_REMOTE_EXPECTED_VERSION") or ""
+agents_dir = home / ".codex" / "agents"
+managed_roles = []
+if agents_dir.exists():
+    for role_path in agents_dir.glob("*.toml"):
+        try:
+            if role_path.read_text(encoding="utf-8", errors="replace").startswith("# >>> pcl-relay managed native agent role v2 >>>\n"):
+                managed_roles.append(role_path.name)
+        except Exception:
+            pass
 try:
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
 except Exception:
@@ -227,11 +243,17 @@ print(json.dumps({
         "# >>> pcl-relay native router root >>>",
         "# <<< pcl-relay native router root <<<",
     )),
-    "native_v1": '"multi_agent_version": "v1"' in (home / ".codex" / "pcl-native-models.json").read_text(encoding="utf-8", errors="replace") if (home / ".codex" / "pcl-native-models.json").exists() else False,
+    "native_v1": False,
+    "native_v2": all(marker in text for marker in ('[features.multi_agent_v2]', 'hide_spawn_agent_metadata = true', 'tool_namespace = "agents"')) and ('"multi_agent_version": "v2"' in (home / ".codex" / "pcl-native-models.json").read_text(encoding="utf-8", errors="replace") if (home / ".codex" / "pcl-native-models.json").exists() else False),
+    "native_roles": bool(managed_roles),
+    "native_role_names": sorted(managed_roles),
     "native_router_port": native_router_port,
     "native_router_reachable": native_router_reachable,
     "native_router_gateway_reachable": native_router_gateway_reachable,
     "client_installed": (home / ".local" / "bin" / "pcl-codex").exists(),
+    "client_version": client_version,
+    "expected_client_version": expected_client_version,
+    "update_available": bool(expected_client_version and client_version != expected_client_version),
     "gateway": gateway,
     "gateway_reachable": reachable,
     "gateway_latency_ms": gateway_latency_ms,
@@ -252,6 +274,7 @@ def remote_client_status(target: str, gateway_url: str, deep: bool = False) -> D
         "import os\n"
         + "os.environ['PCL_REMOTE_GATEWAY'] = " + repr(gateway_url) + "\n"
         + "os.environ['PCL_REMOTE_DEEP'] = " + repr("1" if deep else "0") + "\n"
+        + "os.environ['PCL_REMOTE_EXPECTED_VERSION'] = " + repr(__version__) + "\n"
         + REMOTE_STATUS_SOURCE
     )
     try:
@@ -271,11 +294,13 @@ def remote_client_status(target: str, gateway_url: str, deep: bool = False) -> D
         payload.get("supported_system")
         and payload.get("client_installed")
         and payload.get("config_managed")
-        and payload.get("native_v1")
+        and payload.get("native_v2")
+        and payload.get("native_roles")
         and payload.get("native_router_reachable")
         and payload.get("native_router_gateway_reachable")
         and payload.get("gateway_reachable")
         and str(payload.get("gateway") or "").rstrip("/") == gateway_url.rstrip("/")
+        and not payload.get("update_available")
     )
     return payload
 
@@ -656,9 +681,11 @@ def install_remote_client(target: str, gateway_url: str) -> Dict[str, Any]:
     return {
         "ssh_target": target,
         "gateway": gateway_url,
+        "client_version": __version__,
         "status": status,
         "vscode_reload_required": True,
         "scope": ["~/.codex", "~/.local/share/pcl-codex-bridge", "~/.local/bin/pcl-codex", "user native-router service"],
         "main_provider_preserved": True,
         "delegation": "native_spawn_agent",
+        "selection": "native_custom_roles",
     }

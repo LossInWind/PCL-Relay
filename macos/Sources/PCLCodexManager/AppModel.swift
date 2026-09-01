@@ -14,6 +14,8 @@ struct AgentDefinition: Identifiable, Hashable {
     let category: String
     let recommended: Bool
 
+    var nativeRoleName: String { id.replacingOccurrences(of: "_", with: "-") }
+
     init(id: String, model: String, title: String, detail: String, symbol: String, tint: Color, family: String, category: String, recommended: Bool) {
         self.id = id
         self.model = model
@@ -114,7 +116,8 @@ final class AppModel: ObservableObject {
             && doctor?.configManaged == true
             && doctor?.nativeRouter == true
             && doctor?.nativeCatalog == true
-            && doctor?.nativeV1 == true
+            && doctor?.nativeV2 == true
+            && doctor?.nativeRoles == true
     }
 
     var relayReady: Bool {
@@ -487,6 +490,34 @@ final class AppModel: ObservableObject {
                 await discoverNodes(showBanner: false)
             } catch {
                 show("远端接入失败：\(error.localizedDescription)", .error)
+            }
+        }
+    }
+
+    func updateRemoteClient(_ node: RelayCandidate) {
+        guard let target = node.sshTarget, !target.isEmpty, installingClientTarget == nil else {
+            show("该节点没有可用的 SSH 主机配置", .info)
+            return
+        }
+        installingClientTarget = target
+        Task {
+            defer { installingClientTarget = nil }
+            do {
+                let result: CommandResult
+                switch node.feasibility?.recommendedRoute {
+                case "local_pcl_direct":
+                    result = try await runCLI(["direct", "install", target])
+                case "bridge_via_local_mac":
+                    result = try await runCLI(["bridges", "install", target])
+                default:
+                    result = try await runCLI(["clients", "update", target])
+                }
+                guard result.exitCode == 0 else { throw commandError(result) }
+                commandLog = BridgeDecode.prettyJSON(result.stdout)
+                show("\(node.nodeName) 已升级客户端、模型目录和原生角色；请重新加载该服务器的 VS Code 窗口", .success)
+                await discoverNodes(showBanner: false)
+            } catch {
+                show("远端升级失败：\(error.localizedDescription)", .error)
             }
         }
     }

@@ -23,11 +23,18 @@ def alias_contract() -> str:
     return ", ".join(f"{alias}={model}" for alias, model in native_agents().items())
 
 
+def role_contract() -> str:
+    return ", ".join(
+        f"{alias.replace('_', '-')}={model}"
+        for alias, model in native_agents().items()
+    )
+
+
 def tools() -> list:
     return [
         {
             "name": "pcl_models",
-            "description": "Show or refresh the PCL model catalog. Execution uses Codex native v1 spawn_agent, never MCP. Exact aliases: " + alias_contract(),
+            "description": "Show or refresh the PCL model catalog. Execution uses Codex native custom roles through spawn_agent, never MCP or pcl_delegate. Exact roles: " + role_contract(),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -39,7 +46,7 @@ def tools() -> list:
         },
         {
             "name": "pcl_native_status",
-            "description": "Check whether PCL Relay's loopback router and Codex native v1 sub-agent integration are ready.",
+            "description": "Check whether PCL Relay's loopback router and Codex native custom-role sub-agent integration are ready.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -60,7 +67,8 @@ def call_tool(name: str, arguments: Dict[str, Any]) -> Any:
         return {
             "registry": value,
             "native_agents": native_agents(),
-            "delegation": "Use Codex native v1 spawn_agent with one of the exact model ids above.",
+            "native_roles": role_contract(),
+            "delegation": "Use Codex native spawn_agent/custom agent roles. Never use pcl_delegate.",
         }
     if name == "pcl_native_status":
         return {
@@ -90,8 +98,8 @@ def handle(message: Dict[str, Any]) -> None:
             {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "pcl-relay-management", "version": "2.0.0"},
-                "instructions": "PCL execution models are Codex native v1 sub-agents. MCP is management-only. Resolve user aliases before spawn_agent: " + alias_contract(),
+                "serverInfo": {"name": "pcl-relay-management", "version": "2.1.0"},
+                "instructions": "PCL execution models are Codex native custom-role sub-agents. MCP is management-only and pcl_delegate does not exist. Select one of these native roles when delegating: " + role_contract(),
             },
         )
     elif method in {"notifications/initialized", "notifications/cancelled"}:

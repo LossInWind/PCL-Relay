@@ -86,6 +86,20 @@ private struct NetworkView: View {
     private var relayID: String { model.relayDiscovery?.recommendation?.relayID ?? model.currentRelay?.tailscaleIP ?? "" }
     private var localID: String { model.tailnetNodes.first(where: \.isSelf)?.tailscaleIP ?? "" }
     private var selectedNode: RelayCandidate? { model.tailnetNodes.first { $0.tailscaleIP == selectedID } }
+    private var topologyHeight: CGFloat {
+        let upstreamLane = model.tailnetNodes.filter {
+            !$0.isSelf && ($0.tailscaleIP == relayID || $0.feasibility?.recommendedRoute == "local_pcl_direct")
+        }.count
+        let peerLane = model.tailnetNodes.filter {
+            !$0.isSelf && $0.tailscaleIP != relayID && $0.feasibility?.recommendedRoute != "local_pcl_direct"
+        }.count
+        return max(390, CGFloat(max(max(upstreamLane, peerLane), 1)) * 96 + 100)
+    }
+    private var topologySignature: [String] {
+        model.tailnetNodes.map {
+            "\($0.tailscaleIP):\($0.feasibility?.recommendedRoute ?? "unavailable"):read=\($0.online)"
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -160,14 +174,14 @@ private struct NetworkView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.09)))
                 .onAppear {
-                    seedPositions(size: proxy.size)
+                    seedPositions(size: proxy.size, reset: true)
                     if model.relayDiscovery?.recommendation != nil {
                         useRecommendation()
                         initializedRecommendation = true
                     }
                 }
-                .onChange(of: model.tailnetNodes.map(\.tailscaleIP)) { _, _ in
-                    seedPositions(size: proxy.size)
+                .onChange(of: topologySignature) { _, _ in
+                    seedPositions(size: proxy.size, reset: true)
                     if plannedEdges.isEmpty { useRecommendation() }
                 }
                 .onChange(of: model.relayDiscovery?.checkedAt) { _, _ in
@@ -178,7 +192,7 @@ private struct NetworkView: View {
                 }
                 .onChange(of: model.topologyRoutes) { _, _ in rebuildEdges() }
             }
-            .frame(height: 370)
+            .frame(height: topologyHeight)
 
             TopologyInspector(node: selectedNode, relayID: relayID, onPlan: planRoute, onSelectRelay: { node in model.selectRelay(node) })
 
@@ -222,20 +236,54 @@ private struct NetworkView: View {
         }
     }
 
-    private func seedPositions(size: CGSize) {
-        let width = max(size.width - 80, 760)
-        let height = max(size.height - 60, 390)
-        positions["pcl-api"] = positions["pcl-api"] ?? CGPoint(x: width * 0.13, y: height * 0.5)
+    private func seedPositions(size: CGSize, reset: Bool = false) {
+        let canvasWidth = max(size.width, 820)
+        let canvasHeight = max(size.height, topologyHeight)
+        let xAPI = max(105, canvasWidth * 0.10)
+        let xUpstream = canvasWidth * 0.34
+        let xLocal = canvasWidth * 0.58
+        let xPeers = min(canvasWidth - 110, canvasWidth * 0.84)
+
+        if reset { positions = [:] }
+        positions["pcl-api"] = positions["pcl-api"] ?? CGPoint(x: xAPI, y: canvasHeight * 0.52)
+
         let devices = model.tailnetNodes
-        for (index, node) in devices.enumerated() where positions[node.tailscaleIP] == nil {
-            if node.tailscaleIP == relayID {
-                positions[node.tailscaleIP] = CGPoint(x: width * 0.37, y: height * 0.5)
-            } else if node.isSelf {
-                positions[node.tailscaleIP] = CGPoint(x: width * 0.61, y: height * 0.36)
-            } else {
-                let row = CGFloat(index % 3)
-                positions[node.tailscaleIP] = CGPoint(x: width * 0.84, y: height * (0.20 + row * 0.30))
-            }
+        if let relay = devices.first(where: { $0.tailscaleIP == relayID }) {
+            positions[relay.tailscaleIP] = positions[relay.tailscaleIP] ?? CGPoint(x: xUpstream, y: canvasHeight * 0.52)
+        }
+        if let local = devices.first(where: \.isSelf) {
+            positions[local.tailscaleIP] = positions[local.tailscaleIP] ?? CGPoint(x: xLocal, y: canvasHeight * 0.52)
+        }
+
+        let directPCL = devices.filter {
+            !$0.isSelf && $0.tailscaleIP != relayID && $0.feasibility?.recommendedRoute == "local_pcl_direct"
+        }
+        let directSlots = laneSlots(count: directPCL.count, height: canvasHeight, avoidCenter: true)
+        for (node, y) in zip(directPCL, directSlots) {
+            positions[node.tailscaleIP] = positions[node.tailscaleIP] ?? CGPoint(x: xUpstream, y: y)
+        }
+
+        let peers = devices.filter {
+            !$0.isSelf && $0.tailscaleIP != relayID && $0.feasibility?.recommendedRoute != "local_pcl_direct"
+        }
+        let peerSlots = laneSlots(count: peers.count, height: canvasHeight, avoidCenter: false)
+        for (node, y) in zip(peers, peerSlots) {
+            positions[node.tailscaleIP] = positions[node.tailscaleIP] ?? CGPoint(x: xPeers, y: y)
+        }
+    }
+
+    private func laneSlots(count: Int, height: CGFloat, avoidCenter: Bool) -> [CGFloat] {
+        guard count > 0 else { return [] }
+        let top: CGFloat = 62
+        let bottom = height - 62
+        if avoidCenter {
+            let fractions: [CGFloat] = [0.20, 0.84, 0.34, 0.70, 0.08, 0.96]
+            let candidates = fractions.map { min(max(height * $0, top), bottom) }
+            if count <= candidates.count { return Array(candidates.prefix(count)) }
+        }
+        if count == 1 { return [height * 0.52] }
+        return (0..<count).map { index in
+            top + (bottom - top) * CGFloat(index) / CGFloat(count - 1)
         }
     }
 
@@ -305,7 +353,7 @@ private struct NetworkView: View {
         guard let recommendation = model.relayDiscovery?.recommendation else { return }
         model.useRecommendedTopology()
         plannedEdges = recommendation.edges.map { .init(from: $0.from, to: $0.to, type: $0.type, verified: $0.verified) }
-        interactionHint = "已载入自动推荐：\(recommendation.relayName) 作为中转站；绿色为已验证，蓝色虚线为待应用。"
+        interactionHint = "已载入自动推荐：\(recommendation.relayName) 作为中转站；实线为已验证，虚线为待应用。"
     }
 
     private func rebuildEdges() {
@@ -335,12 +383,13 @@ private struct NetworkView: View {
             if test.status == "offline" || test.status == "unreachable" { return .orange }
             if test.status == "ready" && test.route == "local_pcl_direct" { return .cyan }
         }
-        if node.gateway && node.pclAuth == "valid" && node.feasibility?.relayCapable == true { return .green }
+        if node.selected && node.gateway && node.pclAuth == "valid" { return .green }
         switch node.feasibility?.recommendedRoute {
         case "direct": return .blue
         case "local_pcl_direct": return .cyan
         case "bridge_via_local_mac": return .orange
-        default: return .gray
+        default:
+            return node.gateway && node.pclAuth == "valid" && node.feasibility?.relayCapable == true ? .green : .gray
         }
     }
 
@@ -403,7 +452,7 @@ private struct TopologyConnection: View {
         switch edge.type {
         case "upstream": return "PCL 上游"
         case "direct": return "Tailnet 直连"
-        case "local_pcl_direct": return "本地 API"
+        case "local_pcl_direct": return "PCL 直连"
         default: return "SSH 桥接"
         }
     }

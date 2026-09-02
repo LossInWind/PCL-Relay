@@ -512,7 +512,14 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
         ),
         key=lambda node: (int(node.get("latency_ms") or 999999), -int(node.get("model_count") or 0)),
     )
-    recommended_relay = ready_relays[0] if ready_relays else None
+    selected_healthy_relay = next(
+        (node for node in ready_relays if node.get("selected")),
+        None,
+    )
+    # Keep an explicitly selected healthy relay stable.  Latency is only a
+    # failover selector; otherwise independent scans could choose different
+    # centers because of transient timing noise.
+    recommended_relay = selected_healthy_relay or (ready_relays[0] if ready_relays else None)
     local_node = next((node for node in nodes if node.get("self")), None)
     local_bridge_available = bool(
         local_node and os.uname().sysname == "Darwin" and recommended_relay
@@ -528,11 +535,25 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
         selected_relay = bool(
             relay_ip and str(record.get("tailscale_ip") or "") == relay_ip
         )
-        direct = (
+        direct_verified = (
             bool(record.get("self") and recommended_relay)
             or selected_relay
             or bool(status.get("gateway_reachable"))
         )
+        # Tailnet membership is global topology information.  A peer without
+        # local SSH credentials must still appear as a possible direct client;
+        # the edge remains unverified until that endpoint reports success.
+        tailnet_direct_possible = bool(
+            recommended_relay
+            and record.get("online")
+            and not record.get("self")
+            and not selected_relay
+            and (
+                status.get("workspace_tailscale") is True
+                or "workspace_tailscale" not in status
+            )
+        )
+        direct = direct_verified or tailnet_direct_possible
         configured_gateway = str(status.get("configured_gateway") or "")
         local_direct_active = bool(
             configured_gateway.startswith("http://127.0.0.1:")
@@ -555,14 +576,18 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
         # shared relay.  Relay capability therefore comes from the Tailnet gateway
         # probe; SSH remains an independent remote-management capability.
         relay_capable = _is_relay_candidate(record)
-        if direct:
-            route = "direct"
-            reason = "工作区可直接访问所选中转站，跳数最少"
-            score = 100
-        elif pcl_direct:
+        if pcl_direct:
             route = "local_pcl_direct"
-            reason = "工作区可直达 PCL API；使用仅监听回环地址的本地适配器比跨设备桥接更稳定"
-            score = 90
+            reason = "工作区可直达 PCL API；优先使用仅监听回环地址的本地适配器"
+            score = 110
+        elif direct:
+            route = "direct"
+            reason = (
+                "工作区已验证可通过 Tailnet 直连所选中转站"
+                if direct_verified
+                else "设备已加入 Tailnet；推荐直连所选中转站，等待该设备验证"
+            )
+            score = 100
         elif bridge:
             route = "bridge_via_local_mac"
             reason = "工作区不在 Tailnet；可通过当前 Mac 的 SSH 回环桥接"
@@ -577,6 +602,7 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
             "workspace_tailscale": bool(status.get("workspace_tailscale")) if not record.get("self") else True,
             "pcl_network_reachable": bool(status.get("pcl_network_reachable")) if not record.get("self") else False,
             "direct": direct,
+            "direct_verified": direct_verified,
             "bridge_via_local_mac": bridge,
             "local_pcl_direct": pcl_direct,
             "local_pcl_direct_active": local_direct_active,
@@ -592,7 +618,14 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
                 edge["from"] == relay_ip and edge["to"] == node_ip and edge["type"] == "direct"
                 for edge in edges
             ):
-                edges.append({"from": relay_ip, "to": node_ip, "type": "direct", "verified": True})
+                edges.append(
+                    {
+                        "from": relay_ip,
+                        "to": node_ip,
+                        "type": "direct",
+                        "verified": direct_verified,
+                    }
+                )
         elif route == "local_pcl_direct":
             edges.append(
                 {

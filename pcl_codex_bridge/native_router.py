@@ -17,7 +17,7 @@ from .zstd_codec import decompress as zstd_decompress
 
 
 SERVICE_NAME = "pcl-relay-native-router"
-SERVICE_VERSION = "2.3.1"
+SERVICE_VERSION = "2.3.2"
 DEFAULT_PORT = 15724
 PCL_MODEL_PREFIX = "pcl/"
 OPENAI_CODEX_BASE_URL = os.environ.get(

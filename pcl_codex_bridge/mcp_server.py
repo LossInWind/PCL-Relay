@@ -98,7 +98,7 @@ def handle(message: Dict[str, Any]) -> None:
             {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "pcl-relay-management", "version": "2.3.1"},
+                "serverInfo": {"name": "pcl-relay-management", "version": "2.3.2"},
                 "instructions": "PCL execution models are Codex native custom-role sub-agents. MCP is management-only and pcl_delegate does not exist. Select one of these native roles when delegating: " + role_contract(),
             },
         )

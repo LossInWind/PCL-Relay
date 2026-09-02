@@ -464,9 +464,8 @@ final class AppModel: ObservableObject {
             let result = try await runCLI(["clients", "discover", "--timeout", "2"])
             guard result.exitCode == 0 else { throw commandError(result) }
             let decoded = try BridgeDecode.value(RelayDiscovery.self, from: result.stdout)
-            let relayChanged = relayDiscovery?.selectedGateway != decoded.selectedGateway
             relayDiscovery = decoded
-            synchronizeTopologyRoutes(reset: relayChanged || topologyRoutes.isEmpty)
+            synchronizeTopologyRoutes()
             if showBanner {
                 let relays = decoded.nodes.filter { $0.gateway && $0.pclAuth == "valid" }.count
                 show("发现 \(relays) 个可用中转站、\(decoded.readyCount) 个已配置远端客户端", .success)
@@ -476,7 +475,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func synchronizeTopologyRoutes(reset: Bool) {
+    private func synchronizeTopologyRoutes() {
         let recommended = Dictionary(uniqueKeysWithValues: tailnetNodes.compactMap { node -> (String, String)? in
             guard !node.isSelf,
                   !node.selected,
@@ -484,17 +483,13 @@ final class AppModel: ObservableObject {
                   route != "unavailable" else { return nil }
             return (node.tailscaleIP, route)
         })
-        if reset {
-            topologyRoutes = recommended
-            return
-        }
-        var merged = topologyRoutes.filter { id, _ in tailnetNodes.contains(where: { $0.tailscaleIP == id }) }
-        for (id, route) in recommended where merged[id] == nil { merged[id] = route }
-        topologyRoutes = merged
+        // Discovery is the source of truth.  Do not retain a previously planned
+        // bridge after a better direct route has been verified.
+        topologyRoutes = recommended
     }
 
     func useRecommendedTopology() {
-        synchronizeTopologyRoutes(reset: true)
+        synchronizeTopologyRoutes()
     }
 
     func planTopologyRoute(_ node: RelayCandidate, route: String) {

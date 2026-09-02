@@ -190,6 +190,172 @@ class RemoteClientTests(unittest.TestCase):
         self.assertEqual(local["feasibility"]["recommended_route"], "direct")
         self.assertEqual(result["ready_count"], 1)
 
+    def test_pcl_upstream_direct_takes_priority_over_selected_relay(self):
+        relay_report = {
+            "checked_at": "2026-09-02T19:10:00+0800",
+            "nodes": [
+                {
+                    "node_name": "selected-relay",
+                    "magic_dns": "selected-relay.tail.test",
+                    "tailscale_ip": "100.64.0.8",
+                    "online": True,
+                    "self": False,
+                    "gateway": True,
+                    "pcl_auth": "valid",
+                    "model_count": 13,
+                    "latency_ms": 10,
+                    "selected": True,
+                },
+                {
+                    "node_name": "pcl-direct",
+                    "magic_dns": "pcl-direct.tail.test",
+                    "tailscale_ip": "100.64.0.10",
+                    "online": True,
+                    "self": False,
+                    "gateway": True,
+                    "pcl_auth": "valid",
+                    "model_count": 13,
+                    "latency_ms": 40,
+                    "selected": False,
+                },
+            ],
+        }
+        status = {
+            "ssh": True,
+            "supported_system": True,
+            "pcl_network_reachable": True,
+            "gateway_reachable": True,
+            "configured_gateway": "http://127.0.0.1:15722/v1",
+            "configured_gateway_reachable": True,
+            "config_managed": True,
+            "client_installed": True,
+        }
+        with (
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.load_registry",
+                return_value={"gateway": "http://selected-relay.tail.test:15722/v1"},
+            ),
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.discover_relays",
+                return_value=relay_report,
+            ),
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.ssh_inventory",
+                return_value=[{"target": "pcl-direct", "hostname": "pcl-direct", "user": "root", "port": 22}],
+            ),
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.remote_client_status",
+                return_value=status,
+            ),
+        ):
+            result = discover_remote_clients(timeout=2)
+        node = next(item for item in result["nodes"] if item["node_name"] == "pcl-direct")
+        self.assertTrue(node["feasibility"]["direct"])
+        self.assertTrue(node["feasibility"]["pcl_network_reachable"])
+        self.assertEqual(node["feasibility"]["recommended_route"], "local_pcl_direct")
+        self.assertTrue(
+            any(
+                edge["from"] == "pcl-api"
+                and edge["to"] == "100.64.0.10"
+                and edge["type"] == "local_pcl_direct"
+                for edge in result["recommendation"]["edges"]
+            )
+        )
+
+    def test_tailnet_peer_without_local_ssh_stays_in_global_topology(self):
+        relay_report = {
+            "checked_at": "2026-09-02T19:20:00+0800",
+            "nodes": [
+                {
+                    "node_name": "relay",
+                    "magic_dns": "relay.tail.test",
+                    "tailscale_ip": "100.64.0.8",
+                    "online": True,
+                    "self": False,
+                    "gateway": True,
+                    "pcl_auth": "valid",
+                    "model_count": 13,
+                    "latency_ms": 10,
+                    "selected": True,
+                },
+                {
+                    "node_name": "peer-mac",
+                    "magic_dns": "peer-mac.tail.test",
+                    "tailscale_ip": "100.64.0.11",
+                    "online": True,
+                    "self": False,
+                    "gateway": False,
+                    "pcl_auth": "not_checked",
+                    "model_count": 0,
+                    "latency_ms": 20,
+                    "selected": False,
+                },
+            ],
+        }
+        with (
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.load_registry",
+                return_value={"gateway": "http://relay.tail.test:15722/v1"},
+            ),
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.discover_relays",
+                return_value=relay_report,
+            ),
+            mock.patch("pcl_codex_bridge.remote_clients.ssh_inventory", return_value=[]),
+        ):
+            result = discover_remote_clients(timeout=2)
+        peer = next(item for item in result["nodes"] if item["node_name"] == "peer-mac")
+        self.assertEqual(peer["feasibility"]["recommended_route"], "direct")
+        self.assertFalse(peer["feasibility"]["direct_verified"])
+        edge = next(item for item in result["recommendation"]["edges"] if item["to"] == "100.64.0.11")
+        self.assertEqual(edge["type"], "direct")
+        self.assertFalse(edge["verified"])
+
+    def test_healthy_selected_relay_is_stable_even_when_another_probe_is_faster(self):
+        relay_report = {
+            "checked_at": "2026-09-02T19:25:00+0800",
+            "nodes": [
+                {
+                    "node_name": "selected-relay",
+                    "magic_dns": "selected-relay.tail.test",
+                    "tailscale_ip": "100.64.0.8",
+                    "online": True,
+                    "self": False,
+                    "gateway": True,
+                    "pcl_auth": "valid",
+                    "model_count": 13,
+                    "latency_ms": 80,
+                    "selected": True,
+                },
+                {
+                    "node_name": "transiently-faster-relay",
+                    "magic_dns": "fast.tail.test",
+                    "tailscale_ip": "100.64.0.12",
+                    "online": True,
+                    "self": False,
+                    "gateway": True,
+                    "pcl_auth": "valid",
+                    "model_count": 13,
+                    "latency_ms": 5,
+                    "selected": False,
+                },
+            ],
+        }
+        with (
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.load_registry",
+                return_value={"gateway": "http://selected-relay.tail.test:15722/v1"},
+            ),
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.discover_relays",
+                return_value=relay_report,
+            ),
+            mock.patch("pcl_codex_bridge.remote_clients.ssh_inventory", return_value=[]),
+        ):
+            result = discover_remote_clients(timeout=2)
+        self.assertEqual(result["recommendation"]["relay_id"], "100.64.0.8")
+        self.assertEqual(result["recommendation"]["relay_name"], "selected-relay")
+
     @mock.patch("pcl_codex_bridge.remote_clients._tailnet_node_snapshot")
     @mock.patch("pcl_codex_bridge.remote_clients.remote_client_status")
     def test_connectivity_test_explains_tailnet_offline(self, status, tailnet):

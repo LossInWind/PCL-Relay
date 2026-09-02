@@ -93,6 +93,7 @@ final class AppModel: ObservableObject {
 
     private let runner = CommandRunner()
     private var detectionJob: UUID?
+    private var consensusMonitor: Task<Void, Never>?
     let relayNodeName = "haichen-pcl-linux-3070ti"
     let relayMagicDNS = "haichen-pcl-linux-3070ti.tail132f30.ts.net"
     let relayTailscaleIP = "100.113.234.58"
@@ -211,6 +212,23 @@ final class AppModel: ObservableObject {
                 Task { await checkAppUpdate(showBanner: false) }
             } catch {
                 show("刷新失败：\(error.localizedDescription)", .error)
+            }
+        }
+    }
+
+    func startConsensusMonitoring() {
+        guard consensusMonitor == nil else { return }
+        consensusMonitor = Task { [weak self] in
+            let interval = 30.0
+            while !Task.isCancelled {
+                let now = Date().timeIntervalSince1970
+                // Endpoint probes are allowed several seconds.  Read the
+                // previous completed round after all nodes have had time to
+                // publish, rather than exposing a partially updated graph.
+                let nextRound = (floor(now / interval) + 1) * interval + 12
+                try? await Task.sleep(for: .seconds(max(1, nextRound - now)))
+                guard !Task.isCancelled, let self else { return }
+                await self.discoverNodes(showBanner: false)
             }
         }
     }

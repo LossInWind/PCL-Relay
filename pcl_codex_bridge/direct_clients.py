@@ -145,11 +145,30 @@ print(json.dumps({
 def install_local_direct(target: str) -> Dict[str, Any]:
     registry = load_registry()
     selected_gateway = str(registry.get("gateway") or DEFAULT_GATEWAY_URL)
+    relay_report = discover_relays(timeout=2.0)
+    inventory = ssh_inventory()
+    target_node = next(
+        (
+            item
+            for item in relay_report.get("nodes", [])
+            if _node_ssh_target(item, inventory) == target
+        ),
+        {},
+    )
+    node_id = str(target_node.get("tailscale_ip") or "")
+    node_name = str(target_node.get("node_name") or target)
     relay_target = _selected_relay_ssh_target(selected_gateway)
     key = _read_relay_key(relay_target)
     archive = _source_archive()
     payload = struct.pack("!Q", len(key)) + key + archive
-    result = _run_remote_python(target, REMOTE_DIRECT_INSTALL, stdin=payload, timeout=120)
+    source = (
+        "import os\n"
+        + "os.environ['PCL_RELAY_COORDINATOR_URL'] = " + repr(selected_gateway.rstrip("/")) + "\n"
+        + "os.environ['PCL_RELAY_NODE_ID'] = " + repr(node_id) + "\n"
+        + "os.environ['PCL_RELAY_NODE_NAME'] = " + repr(node_name) + "\n"
+        + REMOTE_DIRECT_INSTALL
+    )
+    result = _run_remote_python(target, source, stdin=payload, timeout=120)
     # Drop the only local reference as soon as the transfer completes.
     key = b""
     payload = b""

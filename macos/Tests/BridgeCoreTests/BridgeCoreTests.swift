@@ -33,11 +33,14 @@ final class BridgeCoreTests: XCTestCase {
     }
 
     func testDecodesRelayAndCrossPlatformClientDiscovery() throws {
-        let json = #"{"selected_gateway":"http://relay.tail.test:15722/v1","remote_gateway":"http://100.64.0.2:15722/v1","checked_at":"2026-08-31T17:00:00+0800","ready_count":1,"nodes":[{"node_name":"linux-node","magic_dns":"linux-node.tail.test","tailscale_ip":"100.64.0.3","online":true,"self":false,"gateway_url":"http://linux-node.tail.test:15722/v1","gateway":false,"pcl_auth":"not_checked","model_count":0,"latency_ms":12,"selected":false,"error":"","ssh_target":"linux-node","client_status":{"ssh":true,"ssh_target":"linux-node","ready":true,"system":"Linux","architecture":"x86_64","python_version":"3.12.3","supported_system":true,"config_managed":true,"client_installed":true,"gateway":"http://100.64.0.2:15722/v1","gateway_reachable":true,"error":""}}]}"#
+        let json = #"{"selected_gateway":"http://relay.tail.test:15722/v1","remote_gateway":"http://100.64.0.2:15722/v1","checked_at":"2026-08-31T17:00:00+0800","ready_count":1,"consensus":{"interval_seconds":30,"report_count":4,"expected_count":4,"round_id":42,"complete":true,"source":"endpoint_heartbeats"},"nodes":[{"node_name":"linux-node","magic_dns":"linux-node.tail.test","tailscale_ip":"100.64.0.3","online":true,"self":false,"gateway_url":"http://linux-node.tail.test:15722/v1","gateway":false,"pcl_auth":"not_checked","model_count":0,"latency_ms":12,"selected":false,"error":"","ssh_target":"linux-node","client_status":{"ssh":true,"ssh_target":"linux-node","ready":true,"system":"Linux","architecture":"x86_64","python_version":"3.12.3","supported_system":true,"config_managed":true,"client_installed":true,"gateway":"http://100.64.0.2:15722/v1","gateway_reachable":true,"error":""}}]}"#
         let discovery = try BridgeDecode.value(RelayDiscovery.self, from: json)
         XCTAssertEqual(discovery.remoteGateway, "http://100.64.0.2:15722/v1")
         XCTAssertEqual(discovery.nodes.first?.clientStatus?.system, "Linux")
         XCTAssertTrue(discovery.nodes.first?.clientStatus?.ready == true)
+        XCTAssertEqual(discovery.consensus?.roundID, 42)
+        XCTAssertEqual(discovery.consensus?.expectedCount, 4)
+        XCTAssertTrue(discovery.consensus?.complete == true)
     }
 
     func testDecodesPerDeviceConnectivityTest() throws {

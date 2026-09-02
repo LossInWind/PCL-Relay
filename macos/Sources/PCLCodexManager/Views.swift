@@ -82,6 +82,7 @@ private struct NetworkView: View {
     @State private var interactionHint = "拖动设备调整布局；开启连线模式后依次点击两个设备的连接点。"
     @State private var initializedRecommendation = false
     @State private var showLogs = false
+    @State private var consensusRippleProgress: CGFloat = 1
 
     private var relayID: String { model.relayDiscovery?.recommendation?.relayID ?? model.currentRelay?.tailscaleIP ?? "" }
     private var localID: String { model.tailnetNodes.first(where: \.isSelf)?.tailscaleIP ?? "" }
@@ -111,6 +112,14 @@ private struct NetworkView: View {
                     Text("连接拓扑").font(.title3.weight(.semibold))
                     Text("当前中转站：\(shortDeviceName(model.currentRelay?.nodeName ?? model.relayNodeName))  ·  \(interactionHint)")
                         .font(.caption).foregroundStyle(.secondary)
+                    if let consensus = model.relayDiscovery?.consensus {
+                        HStack(spacing: 6) {
+                            Image(systemName: consensus.complete == true ? "checkmark.circle.fill" : "clock.badge.questionmark")
+                            Text(consensusLabel(consensus))
+                        }
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(consensus.complete == true ? Color.green : Color.orange)
+                    }
                 }
                 Spacer()
                 Button { useRecommendation() } label: { Label("使用自动推荐", systemImage: "wand.and.stars") }
@@ -133,6 +142,14 @@ private struct NetworkView: View {
             GeometryReader { proxy in
                 ZStack {
                     TopologyGrid()
+
+                    if let origin = positions[relayID], (model.relayDiscovery?.consensus?.roundID ?? 0) > 0 {
+                        TopologyConsensusRipple(
+                            origin: origin,
+                            progress: consensusRippleProgress,
+                            reduceMotion: reduceMotion
+                        )
+                    }
 
                     ForEach(plannedEdges) { edge in
                         if let start = positions[edge.from], let end = positions[edge.to] {
@@ -189,6 +206,10 @@ private struct NetworkView: View {
                         useRecommendation()
                         initializedRecommendation = model.relayDiscovery?.recommendation != nil
                     }
+                }
+                .onChange(of: model.relayDiscovery?.consensus?.roundID) { _, roundID in
+                    guard let roundID, roundID > 0 else { return }
+                    triggerConsensusRipple()
                 }
                 .onChange(of: model.topologyRoutes) { _, _ in rebuildEdges() }
             }
@@ -395,11 +416,11 @@ private struct NetworkView: View {
 
     private func nodeBadges(_ node: RelayCandidate) -> [String] {
         var values: [String] = []
-        if node.gateway && node.feasibility?.relayCapable == true { values.append("中转站") }
+        if node.selected && node.gateway && node.feasibility?.relayCapable == true { values.append("当前中转站") }
         else if node.feasibility?.localPCLDirectActive == true { values.append("本地适配器") }
         if node.isSelf { values.append("桥接设备") }
-        if node.feasibility?.relayCapable == true && !node.gateway { values.append("可作中转") }
         values.append(routeLabel(node.feasibility?.recommendedRoute ?? "unavailable"))
+        if node.feasibility?.relayCapable == true && !node.selected { values.append("可作中转") }
         if model.deviceTests[node.tailscaleIP]?.status == "ready" { values.append("已验证") }
         return values
     }
@@ -413,8 +434,47 @@ private struct NetworkView: View {
         }
     }
 
+    private func consensusLabel(_ consensus: TopologyConsensus) -> String {
+        let expected = consensus.expectedCount ?? consensus.reportCount
+        if consensus.complete == true {
+            return "全网已同步 · 轮次 #\(consensus.roundID) · \(consensus.reportCount)/\(expected) 台 · 每 \(consensus.intervalSeconds) 秒"
+        }
+        return "正在收集心跳 · \(consensus.reportCount)/\(expected) 台 · 每 \(consensus.intervalSeconds) 秒"
+    }
+
+    private func triggerConsensusRipple() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { consensusRippleProgress = 0 }
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: reduceMotion ? 0.35 : 1.6)) {
+                consensusRippleProgress = 1
+            }
+        }
+    }
+
     private func shortName(_ value: String) -> String {
         value.replacingOccurrences(of: "haichen-", with: "")
+    }
+}
+
+private struct TopologyConsensusRipple: View {
+    let origin: CGPoint
+    let progress: CGFloat
+    let reduceMotion: Bool
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .stroke(Color.green.opacity(max(0, 0.28 - Double(progress) * 0.28)), lineWidth: index == 0 ? 2 : 1)
+                    .frame(width: 92, height: 92)
+                    .scaleEffect(reduceMotion ? 1.08 : 1 + progress * CGFloat(5 + index * 3))
+            }
+        }
+        .position(origin)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

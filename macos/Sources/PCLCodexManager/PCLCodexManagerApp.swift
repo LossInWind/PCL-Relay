@@ -9,7 +9,10 @@ struct PCLCodexManagerApp: App {
             RootView()
                 .environmentObject(model)
                 .frame(minWidth: 960, minHeight: 640)
-                .task { model.refreshAll() }
+                .task {
+                    model.refreshAll()
+                    model.startConsensusMonitoring()
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1120, height: 760)

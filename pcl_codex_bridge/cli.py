@@ -141,6 +141,17 @@ def install_client(args: argparse.Namespace) -> Dict[str, Any]:
         os.chmod(UNSANDBOXED_MARKER, 0o600)
     registry = load_registry()
     registry["gateway"] = args.gateway_url
+    coordinator = str(os.environ.get("PCL_RELAY_COORDINATOR_URL") or "").rstrip("/")
+    if coordinator:
+        registry["topology_coordinator"] = coordinator
+    elif not any(host in args.gateway_url for host in ("127.0.0.1", "localhost", "[::1]")):
+        registry.setdefault("topology_coordinator", args.gateway_url.rstrip("/"))
+    node_id = str(os.environ.get("PCL_RELAY_NODE_ID") or "").strip()
+    node_name = str(os.environ.get("PCL_RELAY_NODE_NAME") or "").strip()
+    if node_id:
+        registry["topology_node_id"] = node_id
+    if node_name:
+        registry["topology_node_name"] = node_name
     registry.setdefault("models", {})
     save_registry(registry)
     port = choose_native_router_port()

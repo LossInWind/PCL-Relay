@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import io
 import json
 import os
@@ -14,7 +15,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import __version__
 from .client_config import discover_relays, request_json
@@ -487,10 +488,115 @@ def _is_relay_candidate(node: Dict[str, Any]) -> bool:
     )
 
 
+def _shared_topology_reports(
+    relay_report: Dict[str, Any], timeout: float = 2.0
+) -> Dict[str, Dict[str, Any]]:
+    gateways = [
+        node
+        for node in relay_report.get("nodes", [])
+        if node.get("online") and node.get("gateway") and node.get("tailscale_ip")
+    ]
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    def fetch(node: Dict[str, Any]) -> Dict[str, Any]:
+        url = str(node.get("gateway_url") or "")
+        if not url:
+            url = f"http://{node['tailscale_ip']}:15722/v1"
+        return request_json(url.rstrip("/").rsplit("/v1", 1)[0] + "/admin/topology", timeout=max(1, int(timeout)))
+
+    if gateways:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(gateways))) as pool:
+            futures = [pool.submit(fetch, node) for node in gateways]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    snapshot = future.result()
+                except Exception:
+                    continue
+                reports = snapshot.get("reports") if isinstance(snapshot, dict) else None
+                if not isinstance(reports, list):
+                    continue
+                for report in reports:
+                    if not isinstance(report, dict):
+                        continue
+                    node_id = str(report.get("node_id") or "")
+                    round_id = int(report.get("round_id") or 0)
+                    key = f"{round_id}:{node_id}"
+                    previous = merged.get(key)
+                    if node_id and round_id > 0 and (
+                        previous is None
+                        or float(report.get("received_at_epoch") or report.get("reported_at_epoch") or 0)
+                        >= float(previous.get("received_at_epoch") or previous.get("reported_at_epoch") or 0)
+                    ):
+                        merged[key] = report
+    return merged
+
+
+def _completed_topology_round(
+    relay_report: Dict[str, Any], shared_reports: Dict[str, Dict[str, Any]]
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    reports = [item for item in shared_reports.values() if isinstance(item, dict)]
+    online_ids = {
+        str(node.get("tailscale_ip") or "")
+        for node in relay_report.get("nodes", [])
+        if node.get("online") and node.get("tailscale_ip")
+    }
+    # Only managed endpoints that have emitted a recent heartbeat participate
+    # in the round. Tailnet peers without PCL Relay remain visible but do not
+    # block every other endpoint from converging.
+    participant_ids = {
+        str(report.get("node_id") or "")
+        for report in reports
+        if str(report.get("node_id") or "") in online_ids
+    }
+    by_round: Dict[int, Dict[str, Dict[str, Any]]] = {}
+    for report in reports:
+        node_id = str(report.get("node_id") or "")
+        round_id = int(report.get("round_id") or 0)
+        if node_id not in participant_ids or round_id <= 0:
+            continue
+        previous = by_round.setdefault(round_id, {}).get(node_id)
+        if previous is None or float(report.get("received_at_epoch") or report.get("reported_at_epoch") or 0) >= float(
+            previous.get("received_at_epoch") or previous.get("reported_at_epoch") or 0
+        ):
+            by_round[round_id][node_id] = report
+
+    first_round = {
+        node_id: min(
+            int(report.get("round_id") or 0)
+            for report in reports
+            if str(report.get("node_id") or "") == node_id
+            and int(report.get("round_id") or 0) > 0
+        )
+        for node_id in participant_ids
+    }
+    complete_rounds = []
+    round_participants: Dict[int, set[str]] = {}
+    for round_id, round_reports in by_round.items():
+        expected = {
+            node_id for node_id, started_at in first_round.items() if started_at <= round_id
+        }
+        round_participants[round_id] = expected
+        if expected and expected.issubset(round_reports):
+            complete_rounds.append(round_id)
+    round_id = max(complete_rounds, default=0)
+    selected = by_round.get(round_id, {})
+    expected = round_participants.get(round_id, set())
+    return selected, {
+        "interval_seconds": 30,
+        "report_count": len(selected),
+        "expected_count": len(expected) if round_id else len(participant_ids),
+        "round_id": round_id,
+        "complete": bool(round_id and expected.issubset(selected)),
+        "source": "endpoint_heartbeats",
+    }
+
+
 def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
     registry = load_registry()
     gateway_url = str(registry.get("gateway") or DEFAULT_GATEWAY_URL)
     relay_report = discover_relays(timeout=timeout)
+    shared_history = _shared_topology_reports(relay_report, timeout=timeout)
+    shared_reports, consensus_state = _completed_topology_round(relay_report, shared_history)
     remote_gateway = effective_remote_gateway(gateway_url, relay_report)
     inventory = ssh_inventory()
     nodes = []
@@ -498,11 +604,45 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
         record = dict(node)
         target = _node_ssh_target(record, inventory)
         record["ssh_target"] = target
-        record["client_status"] = (
+        status = (
             remote_client_status(target, remote_gateway)
             if target and record.get("online") and not record.get("self")
             else {"ssh": False, "ready": False, "error": "ssh_target_not_configured"}
         )
+        consensus = shared_reports.get(str(record.get("tailscale_ip") or ""))
+        if consensus:
+            reported_version = str(consensus.get("client_version") or "")
+            status = dict(status)
+            status.update(
+                {
+                    "consensus_reported": True,
+                    "client_installed": bool(reported_version),
+                    "client_version": reported_version,
+                    "expected_client_version": __version__,
+                    "update_available": bool(reported_version and reported_version != __version__),
+                    "config_managed": bool(consensus.get("config_managed")),
+                    "native_v2": bool(consensus.get("native_v2")),
+                    "native_roles": bool(consensus.get("native_roles")),
+                    "native_router_reachable": True,
+                    "native_router_gateway_reachable": bool(
+                        consensus.get("configured_gateway_reachable", consensus.get("relay_reachable"))
+                    ),
+                    "gateway": str(consensus.get("coordinator") or remote_gateway),
+                    "gateway_reachable": bool(
+                        consensus.get("coordinator_reachable", consensus.get("relay_reachable"))
+                    ),
+                    "gateway_latency_ms": consensus.get("coordinator_latency_ms", consensus.get("relay_latency_ms")),
+                    "configured_gateway": str(consensus.get("gateway") or ""),
+                    "configured_gateway_reachable": bool(
+                        consensus.get("configured_gateway_reachable", consensus.get("relay_reachable"))
+                    ),
+                    "pcl_network_reachable": bool(consensus.get("pcl_direct")),
+                    "ready": bool(consensus.get("client_ready")) and not bool(reported_version and reported_version != __version__),
+                    "topology_round_id": consensus.get("round_id"),
+                }
+            )
+        record["client_status"] = status
+        record["topology_report"] = consensus or {}
         nodes.append(record)
     ready_relays = sorted(
         (
@@ -535,25 +675,14 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
         selected_relay = bool(
             relay_ip and str(record.get("tailscale_ip") or "") == relay_ip
         )
-        direct_verified = (
-            bool(record.get("self") and recommended_relay)
-            or selected_relay
+        consensus = record.get("topology_report") if isinstance(record.get("topology_report"), dict) else {}
+        client_direct_verified = (
+            selected_relay
             or bool(status.get("gateway_reachable"))
+            or bool(consensus.get("coordinator_reachable", consensus.get("relay_reachable")))
         )
-        # Tailnet membership is global topology information.  A peer without
-        # local SSH credentials must still appear as a possible direct client;
-        # the edge remains unverified until that endpoint reports success.
-        tailnet_direct_possible = bool(
-            recommended_relay
-            and record.get("online")
-            and not record.get("self")
-            and not selected_relay
-            and (
-                status.get("workspace_tailscale") is True
-                or "workspace_tailscale" not in status
-            )
-        )
-        direct = direct_verified or tailnet_direct_possible
+        direct_verified = client_direct_verified
+        direct = direct_verified
         configured_gateway = str(status.get("configured_gateway") or "")
         local_direct_active = bool(
             configured_gateway.startswith("http://127.0.0.1:")
@@ -561,7 +690,7 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
             and status.get("config_managed")
             and status.get("client_installed")
         )
-        pcl_direct = bool(status.get("pcl_network_reachable")) and not record.get("self")
+        pcl_direct = bool(status.get("pcl_network_reachable") or consensus.get("pcl_direct"))
         bridge = bool(
             local_bridge_available
             and not record.get("self")
@@ -584,8 +713,8 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
             route = "direct"
             reason = (
                 "工作区已验证可通过 Tailnet 直连所选中转站"
-                if direct_verified
-                else "设备已加入 Tailnet；推荐直连所选中转站，等待该设备验证"
+                if client_direct_verified
+                else "设备心跳已确认可访问当前中转站"
             )
             score = 100
         elif bridge:
@@ -600,9 +729,10 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
             "relay_capable": relay_capable,
             "relay_installed": bool(record.get("gateway")),
             "workspace_tailscale": bool(status.get("workspace_tailscale")) if not record.get("self") else True,
-            "pcl_network_reachable": bool(status.get("pcl_network_reachable")) if not record.get("self") else False,
+            "pcl_network_reachable": pcl_direct,
             "direct": direct,
             "direct_verified": direct_verified,
+            "client_direct_verified": client_direct_verified,
             "bridge_via_local_mac": bridge,
             "local_pcl_direct": pcl_direct,
             "local_pcl_direct_active": local_direct_active,
@@ -632,7 +762,7 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
                     "from": "pcl-api",
                     "to": node_ip,
                     "type": "local_pcl_direct",
-                    "verified": local_direct_active,
+                    "verified": pcl_direct,
                 }
             )
         elif route == "bridge_via_local_mac" and local_ip:
@@ -653,16 +783,13 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
         "selected_gateway": gateway_url,
         "remote_gateway": remote_gateway,
         "checked_at": relay_report.get("checked_at"),
+        "consensus": consensus_state,
         "nodes": nodes,
         "ready_count": sum(
             1
             for node in nodes
             if node.get("client_status", {}).get("ready")
             or node.get("feasibility", {}).get("local_pcl_direct_active")
-            or (
-                node.get("self")
-                and node.get("feasibility", {}).get("direct")
-            )
         ),
         "recommendation": {
             "relay_id": relay_ip,

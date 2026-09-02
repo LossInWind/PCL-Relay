@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import concurrent.futures
 import gzip
 import json
 import os
+import platform
+import shutil
+import socket
+import subprocess
 import sys
+import threading
 import time
 import zlib
 import urllib.error
@@ -17,9 +23,10 @@ from .zstd_codec import decompress as zstd_decompress
 
 
 SERVICE_NAME = "pcl-relay-native-router"
-SERVICE_VERSION = "2.3.2"
+SERVICE_VERSION = "2.3.3"
 DEFAULT_PORT = 15724
 PCL_MODEL_PREFIX = "pcl/"
+TOPOLOGY_HEARTBEAT_INTERVAL = int(os.environ.get("PCL_RELAY_HEARTBEAT_INTERVAL", "30"))
 OPENAI_CODEX_BASE_URL = os.environ.get(
     "PCL_RELAY_OPENAI_BASE_URL",
     "https://chatgpt.com/backend-api/codex",
@@ -53,6 +60,157 @@ OFFICIAL_FORWARD_HEADERS = {
 def selected_gateway() -> str:
     registry = load_registry()
     return str(registry.get("gateway") or DEFAULT_GATEWAY_URL).rstrip("/")
+
+
+def _gateway_root(url: str) -> str:
+    normalized = url.rstrip("/")
+    return normalized.rsplit("/v1", 1)[0] if normalized.endswith("/v1") else normalized
+
+
+def _tailnet_identity(registry: Dict[str, Any]) -> Tuple[str, str]:
+    node_id = str(registry.get("topology_node_id") or "")
+    node_name = str(registry.get("topology_node_name") or "")
+    candidates = [
+        shutil.which("tailscale") or "",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+        "/usr/bin/tailscale",
+    ]
+    for executable in dict.fromkeys(item for item in candidates if item):
+        if not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+            continue
+        try:
+            result = subprocess.run(
+                [executable, "status", "--self", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+            payload = json.loads(result.stdout) if result.returncode == 0 else {}
+            current = payload.get("Self") if isinstance(payload, dict) else {}
+            addresses = current.get("TailscaleIPs") if isinstance(current, dict) else []
+            node_id = node_id or next((str(value) for value in addresses or [] if ":" not in str(value)), "")
+            node_name = node_name or str(current.get("HostName") or "")
+            if node_id:
+                break
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            continue
+    return node_id, node_name or socket.gethostname()
+
+
+def _probe_health(url: str, timeout: int = 6) -> Tuple[bool, int]:
+    started = time.monotonic()
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(_gateway_root(url) + "/healthz", timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return bool(isinstance(payload, dict) and payload.get("status") == "ok"), int((time.monotonic() - started) * 1000)
+    except Exception:
+        return False, int((time.monotonic() - started) * 1000)
+
+
+def _probe_pcl_direct(timeout: int = 6) -> Tuple[bool, int]:
+    started = time.monotonic()
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        request = urllib.request.Request("https://llmapi.pcl.ac.cn/v1/models")
+        with opener.open(request, timeout=timeout):
+            pass
+        return True, int((time.monotonic() - started) * 1000)
+    except urllib.error.HTTPError as exc:
+        return exc.code in {401, 403}, int((time.monotonic() - started) * 1000)
+    except Exception:
+        return False, int((time.monotonic() - started) * 1000)
+
+
+def topology_heartbeat_payload() -> Dict[str, Any]:
+    registry = load_registry()
+    node_id, node_name = _tailnet_identity(registry)
+    gateway = selected_gateway()
+    coordinator = str(registry.get("topology_coordinator") or gateway).rstrip("/")
+    # All endpoint measurements belong to the same round. Keep the configured
+    # local gateway separate from the shared coordinator: a Pod may use a
+    # healthy 127.0.0.1 adapter without being able to reach the selected relay.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        gateway_future = pool.submit(_probe_health, gateway)
+        coordinator_future = (
+            gateway_future if coordinator == gateway else pool.submit(_probe_health, coordinator)
+        )
+        pcl_future = pool.submit(_probe_pcl_direct)
+        gateway_reachable, gateway_latency = gateway_future.result()
+        coordinator_reachable, coordinator_latency = coordinator_future.result()
+        pcl_direct, pcl_latency = pcl_future.result()
+    config = os.path.expanduser("~/.codex/config.toml")
+    try:
+        config_text = open(config, encoding="utf-8", errors="replace").read()
+    except OSError:
+        config_text = ""
+    roles_dir = os.path.expanduser("~/.codex/agents")
+    native_roles = os.path.isdir(roles_dir) and any(name.startswith("pcl-") and name.endswith(".toml") for name in os.listdir(roles_dir))
+    config_managed = "# >>> pcl-codex-bridge managed block >>>" in config_text and "# >>> pcl-relay native router root >>>" in config_text
+    native_v2 = "[features.multi_agent_v2]" in config_text
+    now = time.time()
+    interval = max(10, TOPOLOGY_HEARTBEAT_INTERVAL)
+    return {
+        "node_id": node_id,
+        "node_name": node_name,
+        "system": platform.system(),
+        "client_version": SERVICE_VERSION,
+        "gateway": gateway,
+        "coordinator": coordinator,
+        "pcl_direct": pcl_direct,
+        "pcl_latency_ms": pcl_latency,
+        "configured_gateway_reachable": gateway_reachable,
+        "configured_gateway_latency_ms": gateway_latency,
+        "coordinator_reachable": coordinator_reachable,
+        "coordinator_latency_ms": coordinator_latency,
+        # Backward-compatible names mean the selected shared relay, never a
+        # private loopback adapter.
+        "relay_reachable": coordinator_reachable,
+        "relay_latency_ms": coordinator_latency,
+        "client_ready": bool(node_id and gateway_reachable and config_managed and native_v2 and native_roles),
+        "config_managed": config_managed,
+        "native_v2": native_v2,
+        "native_roles": native_roles,
+        "can_bridge": bool(node_id and platform.system() in {"Darwin", "Linux"}),
+        "reported_at_epoch": now,
+        "round_id": int(now // interval),
+    }
+
+
+def send_topology_heartbeat() -> None:
+    payload = topology_heartbeat_payload()
+    if not payload.get("node_id"):
+        return
+    registry = load_registry()
+    targets = {
+        selected_gateway(),
+        str(registry.get("topology_coordinator") or "").rstrip("/"),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for target in (item for item in targets if item):
+        try:
+            request = urllib.request.Request(
+                _gateway_root(target) + "/admin/topology/heartbeat",
+                data=raw,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with opener.open(request, timeout=8):
+                pass
+        except Exception:
+            continue
+
+
+def _topology_heartbeat_loop(stop: threading.Event) -> None:
+    interval = max(10, TOPOLOGY_HEARTBEAT_INTERVAL)
+    while not stop.is_set():
+        send_topology_heartbeat()
+        next_round = (int(time.time() // interval) + 1) * interval
+        stop.wait(max(1.0, next_round - time.time()))
 
 
 def decode_request_body(raw: bytes, content_encoding: str = "") -> Tuple[Dict[str, Any], bytes]:
@@ -391,6 +549,14 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
 def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
     server = ThreadingHTTPServer((host, port), NativeRouterHandler)
     server.daemon_threads = True
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_topology_heartbeat_loop,
+        args=(heartbeat_stop,),
+        name="pcl-relay-topology-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
     sys.stderr.write(
         f"{SERVICE_NAME} {SERVICE_VERSION} listening on {host}:{port}; gateway={selected_gateway()}\n"
     )
@@ -398,6 +564,7 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
+        heartbeat_stop.set()
         server.server_close()
 
 

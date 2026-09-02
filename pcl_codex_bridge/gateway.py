@@ -43,6 +43,9 @@ LOG_PATH = Path(
 ).expanduser()
 STARTED_AT = time.time()
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
+TOPOLOGY_REPORT_TTL = int(os.environ.get("PCL_RELAY_TOPOLOGY_TTL", "120"))
+TOPOLOGY_REPORTS: Dict[Tuple[int, str], Dict[str, Any]] = {}
+TOPOLOGY_LOCK = threading.Lock()
 PORTAL_URL = "https://llmapi.pcl.ac.cn"
 PORTAL_DOMAIN = "pcl.ac.cn"
 OCX_COMPACTION_PREFIX = "ocx1:"
@@ -129,8 +132,82 @@ def gateway_status() -> Dict[str, Any]:
         "pid": os.getpid(),
         "uptime_seconds": max(0, int(time.time() - STARTED_AT)),
         "upstream": UPSTREAM_BASE,
-        "admin_scope": ["status", "logs", "restart_self", "portal_proxy"],
+        "admin_scope": ["status", "logs", "restart_self", "portal_proxy", "topology_consensus"],
     }
+
+
+def topology_snapshot() -> Dict[str, Any]:
+    now = time.time()
+    with TOPOLOGY_LOCK:
+        expired = [
+            report_key
+            for report_key, report in TOPOLOGY_REPORTS.items()
+            if now - float(report.get("received_at_epoch") or 0) > TOPOLOGY_REPORT_TTL
+        ]
+        for report_key in expired:
+            TOPOLOGY_REPORTS.pop(report_key, None)
+        reports = [dict(report) for report in TOPOLOGY_REPORTS.values()]
+    reports.sort(
+        key=lambda item: (
+            int(item.get("round_id") or 0),
+            str(item.get("node_name") or item.get("node_id") or ""),
+        )
+    )
+    return {
+        "status": "ok",
+        "service": "pcl-relay-topology-consensus",
+        "version": __version__,
+        "generated_at_epoch": now,
+        "ttl_seconds": TOPOLOGY_REPORT_TTL,
+        "reports": reports,
+    }
+
+
+def record_topology_heartbeat(payload: Dict[str, Any], source_ip: str) -> Dict[str, Any]:
+    node_id = str(payload.get("node_id") or "").strip()
+    node_name = str(payload.get("node_name") or "").strip()
+    if not node_id or len(node_id) > 255 or len(node_name) > 255:
+        raise ValueError("invalid node identity")
+    allowed = {
+        "node_id",
+        "node_name",
+        "system",
+        "client_version",
+        "gateway",
+        "coordinator",
+        "pcl_direct",
+        "pcl_latency_ms",
+        "configured_gateway_reachable",
+        "configured_gateway_latency_ms",
+        "coordinator_reachable",
+        "coordinator_latency_ms",
+        "relay_reachable",
+        "relay_latency_ms",
+        "client_ready",
+        "config_managed",
+        "native_v2",
+        "native_roles",
+        "can_bridge",
+        "reported_at_epoch",
+        "round_id",
+    }
+    report = {key: payload.get(key) for key in allowed if key in payload}
+    report["node_id"] = node_id
+    report["node_name"] = node_name or node_id
+    try:
+        report["round_id"] = int(report.get("round_id") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid topology round") from exc
+    if report["round_id"] <= 0:
+        raise ValueError("invalid topology round")
+    report["source_ip"] = source_ip
+    report["received_at_epoch"] = time.time()
+    with TOPOLOGY_LOCK:
+        # Retain several fixed heartbeat rounds rather than only the newest
+        # report.  Readers can then publish the newest *complete* round and
+        # never render a half-old, half-new network during a round boundary.
+        TOPOLOGY_REPORTS[(report["round_id"], node_id)] = report
+    return report
 
 
 def portal_target_allowed(host: str, port: int) -> bool:
@@ -597,6 +674,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except ValueError:
             return False
 
+    def _topology_allowed(self) -> bool:
+        try:
+            address = ipaddress.ip_address(self.client_address[0])
+            return address.is_loopback or address in TAILNET_V4
+        except ValueError:
+            return False
+
     def do_GET(self) -> None:
         if self.path.startswith("http://"):
             self._proxy_portal_http()
@@ -619,6 +703,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json(403, {"error": "tailnet_only"})
                 return
             self._json(200, gateway_status())
+            return
+        if path == "/admin/topology":
+            if not self._topology_allowed():
+                self._json(403, {"error": "tailnet_only"})
+                return
+            self._json(200, topology_snapshot())
             return
         if path == "/admin/logs":
             if not self._admin_allowed():
@@ -706,6 +796,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/admin/topology/heartbeat":
+            if not self._topology_allowed():
+                self._json(403, {"error": "tailnet_only"})
+                return
+            try:
+                raw = self._body()
+                if not raw or len(raw) > 32 * 1024:
+                    raise ValueError("invalid heartbeat size")
+                payload = json.loads(raw.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("heartbeat must be an object")
+                report = record_topology_heartbeat(payload, self.client_address[0])
+                self._json(202, {"status": "accepted", "node_id": report["node_id"]})
+            except (UnicodeDecodeError, ValueError) as exc:
+                self._json(400, {"error": "invalid_heartbeat", "detail": str(exc)})
+            return
         if path == "/v1/chat/completions":
             self._proxy_chat()
             return

@@ -10,6 +10,54 @@ from pcl_codex_bridge import native_router
 
 
 class NativeRouterTests(unittest.TestCase):
+    def test_topology_heartbeat_reports_endpoint_measurements(self):
+        managed = "# >>> pcl-codex-bridge managed block >>>\n# >>> pcl-relay native router root >>>\n[features.multi_agent_v2]\n"
+        with (
+            mock.patch.object(native_router, "load_registry", return_value={"topology_coordinator": "http://relay.tail:15722/v1"}),
+            mock.patch.object(native_router, "selected_gateway", return_value="http://relay.tail:15722/v1"),
+            mock.patch.object(native_router, "_tailnet_identity", return_value=("100.64.0.11", "peer-mac")),
+            mock.patch.object(native_router, "_probe_health", return_value=(True, 21)),
+            mock.patch.object(native_router, "_probe_pcl_direct", return_value=(False, 34)),
+            mock.patch("builtins.open", mock.mock_open(read_data=managed)),
+            mock.patch.object(native_router.os.path, "isdir", return_value=True),
+            mock.patch.object(native_router.os, "listdir", return_value=["pcl-deepseek-pro.toml"]),
+            mock.patch.object(native_router.time, "time", return_value=1260.0),
+        ):
+            payload = native_router.topology_heartbeat_payload()
+        self.assertEqual(payload["node_id"], "100.64.0.11")
+        self.assertTrue(payload["relay_reachable"])
+        self.assertTrue(payload["configured_gateway_reachable"])
+        self.assertTrue(payload["coordinator_reachable"])
+        self.assertFalse(payload["pcl_direct"])
+        self.assertTrue(payload["client_ready"])
+        self.assertEqual(payload["round_id"], 42)
+
+    def test_local_adapter_health_does_not_imply_coordinator_reachability(self):
+        managed = "# >>> pcl-codex-bridge managed block >>>\n# >>> pcl-relay native router root >>>\n[features.multi_agent_v2]\n"
+
+        def health(url):
+            return (url.startswith("http://127.0.0.1:"), 8 if "127.0.0.1" in url else 6000)
+
+        with (
+            mock.patch.object(
+                native_router,
+                "load_registry",
+                return_value={"topology_coordinator": "http://relay.tail:15722/v1"},
+            ),
+            mock.patch.object(native_router, "selected_gateway", return_value="http://127.0.0.1:15722/v1"),
+            mock.patch.object(native_router, "_tailnet_identity", return_value=("100.64.0.12", "pcl-pod")),
+            mock.patch.object(native_router, "_probe_health", side_effect=health),
+            mock.patch.object(native_router, "_probe_pcl_direct", return_value=(True, 12)),
+            mock.patch("builtins.open", mock.mock_open(read_data=managed)),
+            mock.patch.object(native_router.os.path, "isdir", return_value=True),
+            mock.patch.object(native_router.os, "listdir", return_value=["pcl-deepseek-pro.toml"]),
+        ):
+            payload = native_router.topology_heartbeat_payload()
+        self.assertTrue(payload["configured_gateway_reachable"])
+        self.assertFalse(payload["coordinator_reachable"])
+        self.assertFalse(payload["relay_reachable"])
+        self.assertTrue(payload["client_ready"])
+
     def test_routes_prefixed_models_to_pcl(self):
         route, model = native_router.route_request({"model": "pcl/DeepSeek-V4-Pro"})
         self.assertEqual((route, model), ("pcl", "DeepSeek-V4-Pro"))

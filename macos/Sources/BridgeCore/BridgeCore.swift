@@ -325,6 +325,23 @@ public struct TopologyRecommendation: Codable, Equatable, Sendable {
     }
 }
 
+public struct TopologyConsensus: Codable, Equatable, Sendable {
+    public let intervalSeconds: Int
+    public let reportCount: Int
+    public let expectedCount: Int?
+    public let roundID: Int
+    public let complete: Bool?
+    public let source: String
+
+    enum CodingKeys: String, CodingKey {
+        case source, complete
+        case intervalSeconds = "interval_seconds"
+        case reportCount = "report_count"
+        case expectedCount = "expected_count"
+        case roundID = "round_id"
+    }
+}
+
 public struct RelayCandidate: Codable, Equatable, Sendable, Identifiable {
     public var id: String { tailscaleIP }
     public let nodeName: String
@@ -368,9 +385,10 @@ public struct RelayDiscovery: Codable, Equatable, Sendable {
     public let readyCount: Int
     public let nodes: [RelayCandidate]
     public let recommendation: TopologyRecommendation?
+    public let consensus: TopologyConsensus?
 
     enum CodingKeys: String, CodingKey {
-        case nodes, recommendation
+        case nodes, recommendation, consensus
         case tailnetConnected = "tailnet_connected"
         case selectedGateway = "selected_gateway"
         case remoteGateway = "remote_gateway"

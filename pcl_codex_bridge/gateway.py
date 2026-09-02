@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
-import json
 import ipaddress
+import base64
+import binascii
+import json
 import os
 import re
 import select
@@ -43,6 +45,29 @@ STARTED_AT = time.time()
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 PORTAL_URL = "https://llmapi.pcl.ac.cn"
 PORTAL_DOMAIN = "pcl.ac.cn"
+OCX_COMPACTION_PREFIX = "ocx1:"
+COMPACTION_ITEM_TYPES = {"compaction", "compaction_summary", "context_compaction"}
+COMPACT_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work."""
+SUMMARY_PREFIX = (
+    "Another language model started to solve this problem and produced a summary of its "
+    "thinking process. You also have access to the state of the tools that were used by that "
+    "language model. Use this to build on the work that has already been done and avoid "
+    "duplicating work. Here is the summary produced by the other language model, use the "
+    "information in this summary to assist with your own analysis:"
+)
+OPAQUE_COMPACTION_NOTE = (
+    "[earlier conversation was compacted; the summary is stored in a format this model "
+    "cannot read]"
+)
+COMPACT_V1_RETAINED_CHAR_BUDGET = 64_000 * 4
 
 
 def log(message: str) -> None:
@@ -151,6 +176,40 @@ def flatten_content(content: Any) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def encode_compaction_summary(summary: str) -> str:
+    encoded = base64.b64encode(summary.encode("utf-8")).decode("ascii")
+    return OCX_COMPACTION_PREFIX + encoded
+
+
+def decode_compaction_summary(encrypted_content: Any) -> Optional[str]:
+    if not isinstance(encrypted_content, str) or not encrypted_content.startswith(
+        OCX_COMPACTION_PREFIX
+    ):
+        return None
+    try:
+        raw = base64.b64decode(
+            encrypted_content[len(OCX_COMPACTION_PREFIX) :], validate=True
+        )
+        return raw.decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+
+
+def compaction_item_to_text(item: Dict[str, Any]) -> str:
+    summary = decode_compaction_summary(item.get("encrypted_content"))
+    if summary:
+        return f"{SUMMARY_PREFIX}\n\n{summary}"
+    return OPAQUE_COMPACTION_NOTE
+
+
+def is_v2_compaction_request(body: Dict[str, Any]) -> bool:
+    inputs = body.get("input")
+    return isinstance(inputs, list) and any(
+        isinstance(item, dict) and item.get("type") == "compaction_trigger"
+        for item in inputs
+    )
+
+
 def responses_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
     messages: List[Dict[str, Any]] = []
     instructions = body.get("instructions")
@@ -204,6 +263,11 @@ def responses_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "content": output,
                 }
             )
+        elif kind in COMPACTION_ITEM_TYPES:
+            flush()
+            messages.append({"role": "system", "content": compaction_item_to_text(item)})
+        elif kind in {"compaction_trigger", "additional_tools"}:
+            continue
         elif kind != "reasoning":
             flush()
             messages.append({"role": "user", "content": flatten_content(item)})
@@ -296,6 +360,104 @@ def build_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         os.environ.get("PCL_CODEX_DEFAULT_MAX_TOKENS", "4096")
     )
     return request
+
+
+def build_compaction_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
+    compact_body = dict(body)
+    compact_body["tools"] = []
+    compact_body["input"] = [
+        item
+        for item in body.get("input") or []
+        if not (
+            isinstance(item, dict)
+            and item.get("type") in {"compaction_trigger", "additional_tools"}
+        )
+    ]
+    messages = responses_messages(compact_body)
+    messages.append({"role": "user", "content": COMPACT_PROMPT})
+    return {
+        "model": body.get("model"),
+        "messages": messages,
+        "stream": True,
+        "max_tokens": int(os.environ.get("PCL_CODEX_COMPACT_MAX_TOKENS", "4096")),
+    }
+
+
+def collect_chat_completion(
+    chat: Dict[str, Any],
+) -> Tuple[str, Dict[int, Dict[str, Any]], str, Optional[str]]:
+    request = upstream_request(
+        "/chat/completions", json.dumps(chat, ensure_ascii=False).encode("utf-8"), "POST"
+    )
+    content = ""
+    tool_states: Dict[int, Dict[str, Any]] = {}
+    reasoning = ""
+    finish_reason: Optional[str] = None
+    with urllib.request.urlopen(request, timeout=900) as upstream:
+        for raw_line in upstream:
+            line = raw_line.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            chunk = json.loads(data)
+            choice = (chunk.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            content += str(delta.get("content") or "")
+            reasoning += str(delta.get("reasoning_content") or delta.get("reasoning") or "")
+            if choice.get("finish_reason"):
+                finish_reason = str(choice.get("finish_reason"))
+            for tool_delta in delta.get("tool_calls") or []:
+                index = int(tool_delta.get("index", 0))
+                state = tool_states.setdefault(
+                    index,
+                    {
+                        "id": f"fc_{uuid.uuid4().hex}",
+                        "call_id": tool_delta.get("id") or f"call_{uuid.uuid4().hex}",
+                        "name": "",
+                        "arguments": "",
+                    },
+                )
+                function = tool_delta.get("function") or {}
+                state["name"] += str(function.get("name") or "")
+                state["arguments"] += str(function.get("arguments") or "")
+    return content, tool_states, reasoning, finish_reason
+
+
+def generate_compaction_summary(body: Dict[str, Any]) -> str:
+    content, tool_states, _, finish_reason = collect_chat_completion(
+        build_compaction_chat_request(body)
+    )
+    summary = content.strip()
+    if tool_states:
+        raise RuntimeError("PCL compaction unexpectedly returned tool calls")
+    if finish_reason in {"length", "max_tokens"}:
+        raise RuntimeError("PCL compaction summary was truncated")
+    if not summary:
+        raise RuntimeError("PCL compaction returned an empty summary")
+    return summary
+
+
+def retained_compact_messages(inputs: Any) -> List[Dict[str, Any]]:
+    if not isinstance(inputs, list):
+        return []
+    selected: List[Dict[str, Any]] = []
+    used = 0
+    for item in reversed(inputs):
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        if item.get("role") not in {"user", "developer"}:
+            continue
+        size = len(flatten_content(item.get("content")))
+        if selected and used + size > COMPACT_V1_RETAINED_CHAR_BUDGET:
+            break
+        if not selected and size > COMPACT_V1_RETAINED_CHAR_BUDGET:
+            continue
+        selected.append(dict(item))
+        used += size
+    selected.reverse()
+    return selected
 
 
 def upstream_request(path: str, body: Optional[bytes] = None, method: str = "GET") -> urllib.request.Request:
@@ -448,6 +610,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "service": "pcl-codex-gateway",
                     "version": __version__,
                     "upstream": UPSTREAM_BASE,
+                    "compaction": "responses_compact_v1+trigger_v2_ocx1",
                 },
             )
             return
@@ -549,6 +712,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if path == "/v1/responses":
             self._responses()
             return
+        if path == "/v1/responses/compact":
+            self._responses_compact()
+            return
         if path == "/admin/restart":
             if not self._admin_allowed():
                 self._json(403, {"error": "tailnet_only"})
@@ -606,10 +772,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def _responses(self) -> None:
         try:
             body = json.loads(self._body().decode("utf-8"))
+            if is_v2_compaction_request(body):
+                self._responses_compaction_v2(body)
+                return
             chat = build_chat_request(body)
-            request = upstream_request(
-                "/chat/completions", json.dumps(chat, ensure_ascii=False).encode("utf-8"), "POST"
-            )
         except Exception as exc:
             self._json(400, {"error": "invalid_request", "detail": str(exc)})
             return
@@ -622,43 +788,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
         sse = SseWriter(self)
         response_id = f"resp_{uuid.uuid4().hex}"
         output: List[Dict[str, Any]] = []
-        sse.send("response.created", {"response": base_response(body, response_id, "in_progress", [])})
-        sse.send("response.in_progress", {"response": base_response(body, response_id, "in_progress", [])})
+        sse.send(
+            "response.created",
+            {"response": base_response(body, response_id, "in_progress", [])},
+        )
+        sse.send(
+            "response.in_progress",
+            {"response": base_response(body, response_id, "in_progress", [])},
+        )
 
-        content = ""
-        tool_states: Dict[int, Dict[str, Any]] = {}
-        reasoning = ""
-        finish_reason = None
         try:
-            with urllib.request.urlopen(request, timeout=900) as upstream:
-                for raw_line in upstream:
-                    line = raw_line.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    chunk = json.loads(data)
-                    choice = (chunk.get("choices") or [{}])[0]
-                    delta = choice.get("delta") or {}
-                    content += str(delta.get("content") or "")
-                    reasoning += str(delta.get("reasoning_content") or delta.get("reasoning") or "")
-                    if choice.get("finish_reason"):
-                        finish_reason = choice.get("finish_reason")
-                    for tool_delta in delta.get("tool_calls") or []:
-                        index = int(tool_delta.get("index", 0))
-                        state = tool_states.setdefault(
-                            index,
-                            {
-                                "id": f"fc_{uuid.uuid4().hex}",
-                                "call_id": tool_delta.get("id") or f"call_{uuid.uuid4().hex}",
-                                "name": "",
-                                "arguments": "",
-                            },
-                        )
-                        function = tool_delta.get("function") or {}
-                        state["name"] += str(function.get("name") or "")
-                        state["arguments"] += str(function.get("arguments") or "")
+            content, tool_states, reasoning, finish_reason = collect_chat_completion(chat)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
             failed = base_response(body, response_id, "failed", output)
@@ -697,6 +837,70 @@ class GatewayHandler(BaseHTTPRequestHandler):
             f"reasoning={len(reasoning)} tools={len(tool_states)}"
         )
         sse.send("response.completed", {"response": completed})
+
+    def _responses_compact(self) -> None:
+        try:
+            body = json.loads(self._body().decode("utf-8"))
+            summary = generate_compaction_summary(body)
+            output = retained_compact_messages(body.get("input"))
+            output.append(
+                {
+                    "type": "compaction",
+                    "encrypted_content": encode_compaction_summary(summary),
+                }
+            )
+            self._json(200, {"output": output})
+            log(
+                "responses compact v1 completed "
+                f"model={body.get('model')} retained={len(output) - 1} summary={len(summary)}"
+            )
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            self._json(
+                502,
+                {"error": "upstream_error", "detail": f"HTTP {exc.code}: {detail}"},
+            )
+        except Exception as exc:
+            log(f"responses compact v1 failure: {exc}\n{traceback.format_exc()}")
+            self._json(502, {"error": "compaction_failed", "detail": str(exc)})
+
+    def _responses_compaction_v2(self, body: Dict[str, Any]) -> None:
+        try:
+            summary = generate_compaction_summary(body)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            self._json(
+                502,
+                {"error": "upstream_error", "detail": f"HTTP {exc.code}: {detail}"},
+            )
+            return
+        except Exception as exc:
+            log(f"responses compact v2 failure: {exc}\n{traceback.format_exc()}")
+            self._json(502, {"error": "compaction_failed", "detail": str(exc)})
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        sse = SseWriter(self)
+        response_id = f"resp_{uuid.uuid4().hex}"
+        item = {
+            "type": "compaction",
+            "encrypted_content": encode_compaction_summary(summary),
+        }
+        sse.send("response.created", {"response": base_response(body, response_id, "in_progress", [])})
+        sse.send("response.in_progress", {"response": base_response(body, response_id, "in_progress", [])})
+        sse.send("response.output_item.done", {"output_index": 0, "item": item})
+        sse.send(
+            "response.completed",
+            {"response": base_response(body, response_id, "completed", [item])},
+        )
+        log(
+            "responses compact v2 completed "
+            f"model={body.get('model')} summary={len(summary)}"
+        )
 
     @staticmethod
     def _emit_text(sse: SseWriter, output: List[Dict[str, Any]], text: str) -> None:

@@ -28,6 +28,7 @@ ChatGPT Codex 后端       Tailnet 中转站:15722 -> PCL API
 - PCL 模型写入 Codex 原生 multi-agent v2 目录，并同步为 `~/.codex/agents/*.toml` custom roles。主 GPT 通过原生 `spawn_agent`/角色调用，创建、进度和结果显示在 Codex 自己的任务界面中。
 - 混合 provider 使用非保留的 `agents` V2 协作命名空间；路由只取消任务正文的 OpenAI 私有加密标记，保留官方 reasoning 密文与登录边界，因此 PCL 子 Agent 能读懂父任务。
 - 子 Agent 自动继承当前 Codex / VS Code 工作区，无需在 PCL Relay 中再选择目录。
+- PCL 子 Agent 支持 Codex 原生远程上下文压缩：旧版 `/responses/compact` 与新版 `compaction_trigger` 均由所选 PCL 模型生成检查点摘要，并使用与 OpenCodex / CCSwitchMulti 兼容的 `ocx1` 信封安全续跑；压缩不会退回 GPT，也不会把 PCL Key 发到客户端。
 - MCP 只保留模型发现和健康状态，不执行任务，也不再启动外部 `codex exec`。
 
 PCL API Key 默认只保存在所选中转站的 `~/.config/pcl-codex-bridge/api-key`（权限 `600`）。普通 Tailnet 客户端、Codex 配置和子 Agent 上下文均不保存该 Key。

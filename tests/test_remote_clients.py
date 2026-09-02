@@ -5,8 +5,8 @@ from unittest import mock
 
 from pcl_codex_bridge.remote_clients import (
     _is_relay_candidate,
-    remote_client_status,
     check_client_connectivity,
+    remote_client_status,
 )
 
 

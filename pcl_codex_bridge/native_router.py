@@ -17,7 +17,7 @@ from .zstd_codec import decompress as zstd_decompress
 
 
 SERVICE_NAME = "pcl-relay-native-router"
-SERVICE_VERSION = "2.2.1"
+SERVICE_VERSION = "2.3.0"
 DEFAULT_PORT = 15724
 PCL_MODEL_PREFIX = "pcl/"
 OPENAI_CODEX_BASE_URL = os.environ.get(
@@ -177,7 +177,7 @@ def upstream_url(route: str, request_path: str) -> str:
         raise ValueError(f"Unsupported data-plane path: {path}")
     suffix = path[len("/v1") :]
     if route == "pcl":
-        if suffix not in {"/responses", "/chat/completions"}:
+        if suffix not in {"/responses", "/responses/compact", "/chat/completions"}:
             raise ValueError(f"PCL child models do not support {suffix}")
         return selected_gateway() + suffix
     allowed = {
@@ -248,7 +248,7 @@ def _public_response_headers(headers: Any) -> Dict[str, str]:
 
 class NativeRouterHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "PCLRelayNativeRouter/2.2"
+    server_version = "PCLRelayNativeRouter/2.3"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(
@@ -306,6 +306,7 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
                     "gateway_error": error,
                     "official_route": "chatgpt-forward",
                     "multi_agent_surface": "v2_custom_roles",
+                    "compaction": "responses_compact_v1+trigger_v2_ocx1",
                 },
             )
             return

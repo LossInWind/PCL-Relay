@@ -110,6 +110,10 @@ class NativeRouterTests(unittest.TestCase):
                 native_router.upstream_url("pcl", "/v1/responses"),
                 "http://relay.tail:15722/v1/responses",
             )
+            self.assertEqual(
+                native_router.upstream_url("pcl", "/v1/responses/compact"),
+                "http://relay.tail:15722/v1/responses/compact",
+            )
         self.assertEqual(
             native_router.upstream_url("openai", "/v1/responses"),
             native_router.OPENAI_CODEX_BASE_URL + "/responses",

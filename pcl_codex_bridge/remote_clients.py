@@ -479,12 +479,11 @@ def effective_remote_gateway(gateway_url: str, relay_report: Optional[Dict[str, 
 
 
 def _is_relay_candidate(node: Dict[str, Any]) -> bool:
-    status = node.get("client_status")
     return bool(
-        node.get("gateway")
+        node.get("online")
+        and node.get("gateway")
         and node.get("pcl_auth") == "valid"
-        and isinstance(status, dict)
-        and status.get("relay_capable")
+        and int(node.get("model_count") or 0) > 0
     )
 
 
@@ -526,7 +525,14 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
 
     for record in nodes:
         status = record.get("client_status") if isinstance(record.get("client_status"), dict) else {}
-        direct = bool(record.get("self") and recommended_relay) or bool(status.get("gateway_reachable"))
+        selected_relay = bool(
+            relay_ip and str(record.get("tailscale_ip") or "") == relay_ip
+        )
+        direct = (
+            bool(record.get("self") and recommended_relay)
+            or selected_relay
+            or bool(status.get("gateway_reachable"))
+        )
         configured_gateway = str(status.get("configured_gateway") or "")
         local_direct_active = bool(
             configured_gateway.startswith("http://127.0.0.1:")
@@ -546,8 +552,9 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
         # A loopback adapter can be visible through a host/container port mapping
         # without the managed workspace itself owning a Tailnet address.  That is
         # useful for local PCL access, but it must not make the Pod a recommended
-        # shared relay.  Relay capability therefore comes from the workspace probe.
-        relay_capable = bool(status.get("relay_capable"))
+        # shared relay.  Relay capability therefore comes from the Tailnet gateway
+        # probe; SSH remains an independent remote-management capability.
+        relay_capable = _is_relay_candidate(record)
         if direct:
             route = "direct"
             reason = "工作区可直接访问所选中转站，跳数最少"
@@ -619,6 +626,10 @@ def discover_remote_clients(timeout: float = 2.0) -> Dict[str, Any]:
             for node in nodes
             if node.get("client_status", {}).get("ready")
             or node.get("feasibility", {}).get("local_pcl_direct_active")
+            or (
+                node.get("self")
+                and node.get("feasibility", {}).get("direct")
+            )
         ),
         "recommendation": {
             "relay_id": relay_ip,

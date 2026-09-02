@@ -6,6 +6,7 @@ from unittest import mock
 from pcl_codex_bridge.remote_clients import (
     _is_relay_candidate,
     check_client_connectivity,
+    discover_remote_clients,
     remote_client_status,
 )
 
@@ -128,6 +129,66 @@ class RemoteClientTests(unittest.TestCase):
             },
         }
         self.assertFalse(_is_relay_candidate(node))
+
+    def test_healthy_tailnet_relay_does_not_require_ssh_credentials(self):
+        node = {
+            "online": True,
+            "gateway": True,
+            "pcl_auth": "valid",
+            "model_count": 13,
+            "client_status": {
+                "ssh": False,
+                "relay_capable": False,
+            },
+        }
+        self.assertTrue(_is_relay_candidate(node))
+
+    def test_local_mac_is_ready_when_gateway_probe_succeeds_without_ssh_inventory(self):
+        relay_report = {
+            "checked_at": "2026-09-02T18:39:54+0800",
+            "nodes": [
+                {
+                    "node_name": "relay",
+                    "magic_dns": "relay.tail.test",
+                    "tailscale_ip": "100.64.0.8",
+                    "online": True,
+                    "self": False,
+                    "gateway": True,
+                    "pcl_auth": "valid",
+                    "model_count": 13,
+                    "latency_ms": 20,
+                    "selected": True,
+                },
+                {
+                    "node_name": "local-mac",
+                    "magic_dns": "local.tail.test",
+                    "tailscale_ip": "100.64.0.9",
+                    "online": True,
+                    "self": True,
+                    "gateway": False,
+                    "pcl_auth": "not_checked",
+                    "model_count": 0,
+                    "latency_ms": 5,
+                    "selected": False,
+                },
+            ],
+        }
+        with (
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.load_registry",
+                return_value={"gateway": "http://relay.tail.test:15722/v1"},
+            ),
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.discover_relays",
+                return_value=relay_report,
+            ),
+            mock.patch("pcl_codex_bridge.remote_clients.ssh_inventory", return_value=[]),
+        ):
+            result = discover_remote_clients(timeout=2)
+        local = next(node for node in result["nodes"] if node["self"])
+        self.assertEqual(result["recommendation"]["relay_id"], "100.64.0.8")
+        self.assertEqual(local["feasibility"]["recommended_route"], "direct")
+        self.assertEqual(result["ready_count"], 1)
 
     @mock.patch("pcl_codex_bridge.remote_clients._tailnet_node_snapshot")
     @mock.patch("pcl_codex_bridge.remote_clients.remote_client_status")

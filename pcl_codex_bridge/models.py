@@ -162,9 +162,10 @@ def save_registry(data: Dict[str, Any]) -> None:
 
 def model_catalog(definitions: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
     levels = [
-        {"effort": "low", "description": "Fast response"},
-        {"effort": "medium", "description": "Balanced reasoning"},
-        {"effort": "high", "description": "Deeper reasoning"},
+        {"effort": "low", "description": "Brief prompt-steered reasoning"},
+        {"effort": "medium", "description": "Balanced prompt-steered reasoning"},
+        {"effort": "high", "description": "Thorough prompt-steered reasoning"},
+        {"effort": "xhigh", "description": "Very thorough prompt-steered reasoning"},
     ]
     models = []
     for priority, (agent, info) in enumerate((definitions or configured_agents()).items(), 1):
@@ -185,7 +186,7 @@ def model_catalog(definitions: Optional[Dict[str, Dict[str, str]]] = None) -> Di
                 "include_skills_usage_instructions": False,
                 "include_plugin_usage_instructions": False,
                 "include_apps_usage_instructions": False,
-                "default_reasoning_summary": "none",
+                "default_reasoning_summary": "detailed",
                 "supports_parallel_tool_calls": True,
                 "support_verbosity": False,
                 "default_verbosity": "low",

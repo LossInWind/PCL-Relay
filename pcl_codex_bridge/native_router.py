@@ -18,12 +18,13 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from . import __version__
 from .models import DEFAULT_GATEWAY_URL, load_registry
 from .zstd_codec import decompress as zstd_decompress
 
 
 SERVICE_NAME = "pcl-relay-native-router"
-SERVICE_VERSION = "2.3.3"
+SERVICE_VERSION = __version__
 DEFAULT_PORT = 15724
 PCL_MODEL_PREFIX = "pcl/"
 TOPOLOGY_HEARTBEAT_INTERVAL = int(os.environ.get("PCL_RELAY_HEARTBEAT_INTERVAL", "30"))
@@ -404,9 +405,39 @@ def _public_response_headers(headers: Any) -> Dict[str, str]:
     return result
 
 
+def relay_upstream_body(response: Any, target: Any) -> None:
+    """Copy an upstream response without buffering SSE events.
+
+    ``HTTPResponse.read(size)`` is allowed to wait until ``size`` bytes have
+    arrived.  That is useful for downloads but makes a token stream appear to
+    complete all at once.  SSE is line framed, so forward each line and flush
+    immediately.  For every other content type, ``read1`` preserves efficient
+    chunking while returning currently available bytes when the implementation
+    supports it.
+    """
+
+    content_type = str(response.headers.get("Content-Type", "")).lower()
+    if "text/event-stream" in content_type:
+        while True:
+            chunk = response.readline()
+            if not chunk:
+                break
+            target.write(chunk)
+            target.flush()
+        return
+
+    reader = getattr(response, "read1", None) or response.read
+    while True:
+        chunk = reader(64 * 1024)
+        if not chunk:
+            break
+        target.write(chunk)
+        target.flush()
+
+
 class NativeRouterHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "PCLRelayNativeRouter/2.3"
+    server_version = f"PCLRelayNativeRouter/{SERVICE_VERSION}"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(
@@ -515,12 +546,7 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
                     self.send_header(name, value)
                 self.send_header("Connection", "close")
                 self.end_headers()
-                while True:
-                    chunk = response.read(64 * 1024)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
+                relay_upstream_body(response, self.wfile)
             self.close_connection = True
         except urllib.error.HTTPError as exc:
             body = exc.read()

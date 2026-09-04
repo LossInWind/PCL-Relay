@@ -7,6 +7,7 @@ import sys
 import traceback
 from typing import Any, Dict
 
+from . import __version__
 from .client_config import detect_models, discover_models, doctor, native_router_health
 from .models import DEFAULT_GATEWAY_URL, configured_agents, load_registry
 
@@ -98,7 +99,7 @@ def handle(message: Dict[str, Any]) -> None:
             {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "pcl-relay-management", "version": "2.3.3"},
+                "serverInfo": {"name": "pcl-relay-management", "version": __version__},
                 "instructions": "PCL execution models are Codex native custom-role sub-agents. MCP is management-only and pcl_delegate does not exist. Select one of these native roles when delegating: " + role_contract(),
             },
         )

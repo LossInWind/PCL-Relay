@@ -2,6 +2,7 @@ import json
 import http.client
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,7 @@ from pcl_codex_bridge.gateway import (
     portal_target_allowed,
     recent_logs,
     record_topology_heartbeat,
+    reasoning_effort_policy,
     retained_compact_messages,
     responses_messages,
     topology_snapshot,
@@ -31,6 +33,18 @@ from pcl_codex_bridge.gateway import (
 
 
 class GatewayMappingTests(unittest.TestCase):
+    def test_responses_string_input_is_one_user_message(self):
+        messages = responses_messages(
+            {"instructions": "Be concise.", "input": "请回答：7乘以8是多少？"}
+        )
+        self.assertEqual(
+            messages,
+            [
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "请回答：7乘以8是多少？"},
+            ],
+        )
+
     def test_compaction_envelope_round_trip_and_replay(self):
         encoded = encode_compaction_summary("keep decisions and next steps")
         self.assertTrue(encoded.startswith("ocx1:"))
@@ -206,6 +220,250 @@ class GatewayMappingTests(unittest.TestCase):
         chat = build_chat_request(body)
         self.assertEqual(chat["tools"][0]["function"]["name"], "shell")
         self.assertIn("tool_calls", chat["messages"][0]["content"])
+
+    def test_reasoning_effort_is_honest_prompt_compatibility(self):
+        body = {
+            "model": "DeepSeek-V4-Pro",
+            "reasoning": {"effort": "xhigh", "summary": "detailed"},
+            "input": [{"type": "message", "role": "user", "content": "work"}],
+        }
+        policy = reasoning_effort_policy(body)
+        chat = build_chat_request(body)
+        self.assertEqual(policy["requested"], "xhigh")
+        self.assertEqual(policy["effective"], "xhigh")
+        self.assertEqual(policy["mode"], "prompt_compat")
+        self.assertEqual(policy["native_supported"], "false")
+        self.assertIn("Codex requested xhigh", chat["messages"][0]["content"])
+        self.assertNotIn("reasoning_effort", chat)
+
+    @staticmethod
+    def _sse_events(raw: str):
+        result = []
+        for line in raw.splitlines():
+            if line.startswith("data: "):
+                result.append(json.loads(line[6:]))
+        return result
+
+    def test_responses_streams_reasoning_before_upstream_finishes(self):
+        first_delta_sent = threading.Event()
+        allow_finish = threading.Event()
+
+        def slow_stream(_chat):
+            first_delta_sent.set()
+            yield {"kind": "reasoning", "delta": "先检查"}
+            if not allow_finish.wait(2):
+                raise RuntimeError("test did not consume the first live delta")
+            yield {"kind": "reasoning", "delta": "，再执行"}
+            yield {"kind": "content", "delta": "完成"}
+            yield {"kind": "finish", "reason": "stop"}
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (
+                mock.patch("pcl_codex_bridge.gateway.iter_chat_completion", side_effect=slow_stream),
+                mock.patch("pcl_codex_bridge.gateway.log"),
+            ):
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    body=json.dumps({"model": "GLM-5.2", "input": []}),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                observed = None
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    line = response.readline().decode("utf-8")
+                    if line.startswith("data: "):
+                        event = json.loads(line[6:])
+                        if event.get("type") == "response.reasoning_summary_text.delta":
+                            observed = event
+                            break
+                self.assertTrue(first_delta_sent.is_set())
+                self.assertIsNotNone(observed)
+                self.assertEqual(observed["delta"], "先检查")
+                self.assertFalse(allow_finish.is_set())
+                allow_finish.set()
+                remainder = response.read().decode("utf-8")
+                events = self._sse_events(remainder)
+                self.assertTrue(any(event.get("type") == "response.completed" for event in events))
+        finally:
+            allow_finish.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_responses_preserves_native_tool_argument_deltas(self):
+        def tool_stream(_chat):
+            yield {
+                "kind": "tool",
+                "index": 0,
+                "call_id": "call_live",
+                "name_delta": "shell",
+                "arguments_delta": '{"cmd":',
+            }
+            yield {
+                "kind": "tool",
+                "index": 0,
+                "name_delta": "",
+                "arguments_delta": '"pwd"}',
+            }
+            yield {"kind": "finish", "reason": "tool_calls"}
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (
+                mock.patch("pcl_codex_bridge.gateway.iter_chat_completion", side_effect=tool_stream),
+                mock.patch("pcl_codex_bridge.gateway.log"),
+            ):
+                body = {
+                    "model": "DeepSeek-V4-Pro",
+                    "input": [],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "shell",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                }
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    body=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                events = self._sse_events(response.read().decode("utf-8"))
+            deltas = [
+                event["delta"]
+                for event in events
+                if event.get("type") == "response.function_call_arguments.delta"
+            ]
+            self.assertEqual(deltas, ['{"cmd":', '"pwd"}'])
+            done = next(
+                event
+                for event in events
+                if event.get("type") == "response.output_item.done"
+                and event.get("item", {}).get("type") == "function_call"
+            )
+            self.assertEqual(done["item"]["arguments"], '{"cmd":"pwd"}')
+            completed = next(event for event in events if event.get("type") == "response.completed")
+            self.assertEqual(completed["response"]["metadata"]["pcl_tool_stream"], "native_delta")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_responses_buffers_strict_json_tool_fallback(self):
+        def fallback_stream(_chat):
+            yield {"kind": "content", "delta": '{"tool_calls":['}
+            yield {
+                "kind": "content",
+                "delta": '{"name":"shell","arguments":{"cmd":"pwd"}}]}',
+            }
+            yield {"kind": "finish", "reason": "stop"}
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (
+                mock.patch("pcl_codex_bridge.gateway.iter_chat_completion", side_effect=fallback_stream),
+                mock.patch("pcl_codex_bridge.gateway.log"),
+            ):
+                body = {
+                    "model": "Kimi-K3",
+                    "input": [],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "shell",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                }
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    body=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                events = self._sse_events(response.read().decode("utf-8"))
+            self.assertFalse(any(event.get("type") == "response.output_text.delta" for event in events))
+            done = next(
+                event
+                for event in events
+                if event.get("type") == "response.output_item.done"
+                and event.get("item", {}).get("type") == "function_call"
+            )
+            self.assertEqual(done["item"]["name"], "shell")
+            completed = next(event for event in events if event.get("type") == "response.completed")
+            self.assertEqual(completed["response"]["metadata"]["pcl_tool_fallback"], "true")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_failed_stream_never_completes_partial_tool_call(self):
+        def broken_stream(_chat):
+            yield {
+                "kind": "tool",
+                "index": 0,
+                "call_id": "call_partial",
+                "name_delta": "shell",
+                "arguments_delta": '{"cmd":',
+            }
+            raise RuntimeError("upstream disconnected")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (
+                mock.patch("pcl_codex_bridge.gateway.iter_chat_completion", side_effect=broken_stream),
+                mock.patch("pcl_codex_bridge.gateway.log"),
+            ):
+                body = {
+                    "model": "DeepSeek-V4-Pro",
+                    "input": [],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "shell",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                }
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    body=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                events = self._sse_events(response.read().decode("utf-8"))
+            self.assertTrue(any(event.get("type") == "response.failed" for event in events))
+            self.assertFalse(
+                any(
+                    event.get("type") == "response.output_item.done"
+                    and event.get("item", {}).get("type") == "function_call"
+                    for event in events
+                )
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
     def test_converts_freeform_custom_tool_to_chat_function(self):
         body = {

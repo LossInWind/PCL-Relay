@@ -3,6 +3,7 @@ import subprocess
 import unittest
 from unittest import mock
 
+from pcl_codex_bridge import __version__
 from pcl_codex_bridge.remote_clients import (
     _completed_topology_round,
     _is_relay_candidate,
@@ -189,7 +190,7 @@ class RemoteClientTests(unittest.TestCase):
                     "42:100.64.0.9": {
                         "node_id": "100.64.0.9",
                         "node_name": "local-mac",
-                        "client_version": "2.3.3",
+                        "client_version": __version__,
                         "relay_reachable": True,
                         "client_ready": True,
                         "config_managed": True,
@@ -383,7 +384,7 @@ class RemoteClientTests(unittest.TestCase):
                     "100.64.0.11": {
                         "node_id": "100.64.0.11",
                         "node_name": "peer-mac",
-                        "client_version": "2.3.3",
+                        "client_version": __version__,
                         "relay_reachable": True,
                         "relay_latency_ms": 21,
                         "client_ready": True,
@@ -452,7 +453,7 @@ class RemoteClientTests(unittest.TestCase):
                     "100.64.0.13": {
                         "node_id": "100.64.0.13",
                         "node_name": "direct-pcl-gateway",
-                        "client_version": "2.3.3",
+                        "client_version": __version__,
                         "relay_reachable": False,
                         "client_ready": True,
                         "config_managed": True,

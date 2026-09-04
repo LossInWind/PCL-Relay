@@ -3,6 +3,7 @@ import base64
 import http.client
 import threading
 import unittest
+from io import BytesIO
 from http.server import ThreadingHTTPServer
 from unittest import mock
 
@@ -10,6 +11,42 @@ from pcl_codex_bridge import native_router
 
 
 class NativeRouterTests(unittest.TestCase):
+    def test_sse_relay_flushes_each_line_without_sized_read_buffering(self):
+        class FakeResponse:
+            headers = {"Content-Type": "text/event-stream; charset=utf-8"}
+
+            def __init__(self):
+                self.lines = iter(
+                    [
+                        b"event: response.reasoning_summary_text.delta\n",
+                        b'data: {"delta":"think"}\n',
+                        b"\n",
+                    ]
+                )
+
+            def readline(self):
+                return next(self.lines, b"")
+
+            def read(self, _size=-1):
+                raise AssertionError("SSE relay must not use sized read()")
+
+        class FlushRecorder(BytesIO):
+            def __init__(self):
+                super().__init__()
+                self.flush_snapshots = []
+
+            def flush(self):
+                self.flush_snapshots.append(self.getvalue())
+
+        output = FlushRecorder()
+        native_router.relay_upstream_body(FakeResponse(), output)
+        self.assertEqual(len(output.flush_snapshots), 3)
+        self.assertEqual(
+            output.flush_snapshots[0],
+            b"event: response.reasoning_summary_text.delta\n",
+        )
+        self.assertIn(b'"delta":"think"', output.getvalue())
+
     def test_topology_heartbeat_reports_endpoint_measurements(self):
         managed = "# >>> pcl-codex-bridge managed block >>>\n# >>> pcl-relay native router root >>>\n[features.multi_agent_v2]\n"
         with (

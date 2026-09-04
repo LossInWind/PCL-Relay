@@ -22,7 +22,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from . import __version__
 
@@ -71,6 +71,13 @@ OPAQUE_COMPACTION_NOTE = (
     "cannot read]"
 )
 COMPACT_V1_RETAINED_CHAR_BUDGET = 64_000 * 4
+REASONING_EFFORT_GUIDANCE = {
+    "minimal": "Use the shortest adequate analysis and act directly.",
+    "low": "Use brief analysis, then act directly.",
+    "medium": "Balance analysis, implementation, and verification.",
+    "high": "Analyze thoroughly, check assumptions, and verify the result before concluding.",
+    "xhigh": "Analyze very thoroughly, consider failure modes, and perform strong verification before concluding.",
+}
 
 
 def log(message: str) -> None:
@@ -293,6 +300,17 @@ def responses_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
     if instructions:
         messages.append({"role": "system", "content": str(instructions)})
 
+    inputs = body.get("input")
+    # The Responses API accepts either the full item array used by Codex or a
+    # plain input string used by small SDK clients.  A string is iterable in
+    # Python, so normalize it before the item loop instead of accidentally
+    # turning every character into a separate chat message.
+    if isinstance(inputs, str):
+        messages.append({"role": "user", "content": inputs})
+        return normalize_messages(messages)
+    if isinstance(inputs, dict):
+        inputs = [inputs]
+
     pending: List[Dict[str, Any]] = []
 
     def flush() -> None:
@@ -300,7 +318,7 @@ def responses_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
             messages.append({"role": "assistant", "content": "", "tool_calls": list(pending)})
             pending.clear()
 
-    for item in body.get("input") or []:
+    for item in inputs or []:
         if not isinstance(item, dict):
             flush()
             messages.append({"role": "user", "content": str(item)})
@@ -416,15 +434,46 @@ def fallback_tool_instruction(tools: List[Dict[str, Any]]) -> str:
     )
 
 
+def reasoning_effort_policy(body: Dict[str, Any]) -> Dict[str, str]:
+    """Map Codex reasoning effort without claiming an unsupported native control.
+
+    The PCL gateway documents Chat Completions sampling and tool parameters, but
+    currently does not advertise an OpenAI-compatible ``reasoning_effort``
+    parameter.  Preserve the user's intent through explicit prompt steering and
+    report that compatibility mode honestly in response metadata.
+    """
+    reasoning = body.get("reasoning")
+    requested = str(reasoning.get("effort") or "medium") if isinstance(reasoning, dict) else "medium"
+    normalized = requested.lower().strip()
+    if normalized not in REASONING_EFFORT_GUIDANCE:
+        normalized = "medium"
+    return {
+        "requested": requested,
+        "effective": normalized,
+        "mode": "prompt_compat",
+        "native_supported": "false",
+        "guidance": REASONING_EFFORT_GUIDANCE[normalized],
+    }
+
+
+def append_system_instruction(messages: List[Dict[str, Any]], instruction: str) -> None:
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = str(messages[0].get("content", "")) + "\n\n" + instruction
+    else:
+        messages.insert(0, {"role": "system", "content": instruction})
+
+
 def build_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
     tools = responses_tools(body)
     messages = responses_messages(body)
+    effort = reasoning_effort_policy(body)
+    append_system_instruction(
+        messages,
+        "PCL Relay reasoning guidance "
+        f"(Codex requested {effort['requested']}; compatibility mode): {effort['guidance']}",
+    )
     if tools:
-        instruction = fallback_tool_instruction(tools)
-        if messages and messages[0].get("role") == "system":
-            messages[0]["content"] = str(messages[0].get("content", "")) + "\n\n" + instruction
-        else:
-            messages.insert(0, {"role": "system", "content": instruction})
+        append_system_instruction(messages, fallback_tool_instruction(tools))
     request: Dict[str, Any] = {
         "model": body.get("model"),
         "messages": messages,
@@ -442,14 +491,18 @@ def build_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
 def build_compaction_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
     compact_body = dict(body)
     compact_body["tools"] = []
-    compact_body["input"] = [
-        item
-        for item in body.get("input") or []
-        if not (
-            isinstance(item, dict)
-            and item.get("type") in {"compaction_trigger", "additional_tools"}
-        )
-    ]
+    inputs = body.get("input")
+    if isinstance(inputs, list):
+        compact_body["input"] = [
+            item
+            for item in inputs
+            if not (
+                isinstance(item, dict)
+                and item.get("type") in {"compaction_trigger", "additional_tools"}
+            )
+        ]
+    else:
+        compact_body["input"] = inputs
     messages = responses_messages(compact_body)
     messages.append({"role": "user", "content": COMPACT_PROMPT})
     return {
@@ -463,43 +516,81 @@ def build_compaction_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
 def collect_chat_completion(
     chat: Dict[str, Any],
 ) -> Tuple[str, Dict[int, Dict[str, Any]], str, Optional[str]]:
-    request = upstream_request(
-        "/chat/completions", json.dumps(chat, ensure_ascii=False).encode("utf-8"), "POST"
-    )
     content = ""
     tool_states: Dict[int, Dict[str, Any]] = {}
     reasoning = ""
     finish_reason: Optional[str] = None
+    for event in iter_chat_completion(chat):
+        kind = event.get("kind")
+        if kind == "content":
+            content += str(event.get("delta") or "")
+        elif kind == "reasoning":
+            reasoning += str(event.get("delta") or "")
+        elif kind == "finish":
+            finish_reason = str(event.get("reason") or "") or finish_reason
+        elif kind == "tool":
+            index = int(event.get("index") or 0)
+            state = tool_states.setdefault(
+                index,
+                {
+                    "id": f"fc_{uuid.uuid4().hex}",
+                    "call_id": event.get("call_id") or f"call_{uuid.uuid4().hex}",
+                    "name": "",
+                    "arguments": "",
+                },
+            )
+            if event.get("call_id"):
+                state["call_id"] = event["call_id"]
+            state["name"] += str(event.get("name_delta") or "")
+            state["arguments"] += str(event.get("arguments_delta") or "")
+    return content, tool_states, reasoning, finish_reason
+
+
+def _completion_chunk_events(chunk: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
+    choice = (chunk.get("choices") or [{}])[0]
+    delta = choice.get("delta") or choice.get("message") or {}
+    content = delta.get("content")
+    if content:
+        yield {"kind": "content", "delta": str(content)}
+    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+    if reasoning:
+        yield {"kind": "reasoning", "delta": str(reasoning)}
+    for fallback_index, tool_delta in enumerate(delta.get("tool_calls") or []):
+        function = tool_delta.get("function") or {}
+        yield {
+            "kind": "tool",
+            "index": int(tool_delta.get("index", fallback_index)),
+            "call_id": tool_delta.get("id"),
+            "name_delta": str(function.get("name") or ""),
+            "arguments_delta": str(function.get("arguments") or ""),
+        }
+    if choice.get("finish_reason"):
+        yield {"kind": "finish", "reason": str(choice["finish_reason"])}
+    if isinstance(chunk.get("usage"), dict):
+        yield {"kind": "usage", "usage": dict(chunk["usage"])}
+
+
+def iter_chat_completion(chat: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
+    """Yield normalized deltas as soon as the upstream SSE produces them."""
+    request = upstream_request(
+        "/chat/completions", json.dumps(chat, ensure_ascii=False).encode("utf-8"), "POST"
+    )
     with urllib.request.urlopen(request, timeout=900) as upstream:
+        saw_sse = False
+        plain_lines: List[str] = []
         for raw_line in upstream:
             line = raw_line.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
+                if line:
+                    plain_lines.append(line)
                 continue
+            saw_sse = True
             data = line[5:].strip()
             if not data or data == "[DONE]":
                 continue
-            chunk = json.loads(data)
-            choice = (chunk.get("choices") or [{}])[0]
-            delta = choice.get("delta") or {}
-            content += str(delta.get("content") or "")
-            reasoning += str(delta.get("reasoning_content") or delta.get("reasoning") or "")
-            if choice.get("finish_reason"):
-                finish_reason = str(choice.get("finish_reason"))
-            for tool_delta in delta.get("tool_calls") or []:
-                index = int(tool_delta.get("index", 0))
-                state = tool_states.setdefault(
-                    index,
-                    {
-                        "id": f"fc_{uuid.uuid4().hex}",
-                        "call_id": tool_delta.get("id") or f"call_{uuid.uuid4().hex}",
-                        "name": "",
-                        "arguments": "",
-                    },
-                )
-                function = tool_delta.get("function") or {}
-                state["name"] += str(function.get("name") or "")
-                state["arguments"] += str(function.get("arguments") or "")
-    return content, tool_states, reasoning, finish_reason
+            yield from _completion_chunk_events(json.loads(data))
+        if not saw_sse and plain_lines:
+            yield from _completion_chunk_events(json.loads("\n".join(plain_lines)))
 
 
 def generate_compaction_summary(body: Dict[str, Any]) -> str:
@@ -645,6 +736,369 @@ class SseWriter:
         self.handler.wfile.write(f"event: {event}\n".encode("utf-8"))
         self.handler.wfile.write(b"data: " + raw + b"\n\n")
         self.handler.wfile.flush()
+
+
+class ResponsesStreamBridge:
+    """Translate Chat Completions deltas into ordered Responses API events."""
+
+    def __init__(self, sse: SseWriter, body: Dict[str, Any], chat: Dict[str, Any]):
+        self.sse = sse
+        self.body = body
+        self.chat = chat
+        self.next_output_index = 0
+        self.output_slots: Dict[int, Dict[str, Any]] = {}
+        self.reasoning_state: Optional[Dict[str, Any]] = None
+        self.text_state: Optional[Dict[str, Any]] = None
+        self.tool_states: Dict[int, Dict[str, Any]] = {}
+        self.custom_names = {
+            str(tool.get("name"))
+            for tool in body.get("tools") or []
+            if isinstance(tool, dict) and tool.get("type") == "custom" and tool.get("name")
+        }
+        self.allowed_tools = [
+            str(tool["function"]["name"])
+            for tool in chat.get("tools") or []
+            if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+        ]
+        self.pending_content = ""
+        self.content_mode = "undecided" if self.allowed_tools else "text"
+        self.content_chars = 0
+        self.reasoning_chars = 0
+        self.finish_reason: Optional[str] = None
+        self.usage: Optional[Dict[str, Any]] = None
+        self.used_fallback_tool = False
+
+    def _allocate_index(self) -> int:
+        index = self.next_output_index
+        self.next_output_index += 1
+        return index
+
+    def _start_reasoning(self) -> None:
+        self._finish_text()
+        item_id = f"rs_{uuid.uuid4().hex}"
+        index = self._allocate_index()
+        self.reasoning_state = {"id": item_id, "output_index": index, "text": ""}
+        self.sse.send(
+            "response.output_item.added",
+            {"output_index": index, "item": {"id": item_id, "type": "reasoning", "summary": []}},
+        )
+        self.sse.send(
+            "response.reasoning_summary_part.added",
+            {
+                "item_id": item_id,
+                "output_index": index,
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": ""},
+            },
+        )
+
+    def append_reasoning(self, delta: str) -> None:
+        if not delta:
+            return
+        if self.reasoning_state is None:
+            self._start_reasoning()
+        state = self.reasoning_state
+        assert state is not None
+        state["text"] += delta
+        self.reasoning_chars += len(delta)
+        self.sse.send(
+            "response.reasoning_summary_text.delta",
+            {
+                "item_id": state["id"],
+                "output_index": state["output_index"],
+                "summary_index": 0,
+                "delta": delta,
+            },
+        )
+
+    def _finish_reasoning(self) -> None:
+        state = self.reasoning_state
+        if state is None:
+            return
+        part = {"type": "summary_text", "text": state["text"]}
+        self.sse.send(
+            "response.reasoning_summary_text.done",
+            {
+                "item_id": state["id"],
+                "output_index": state["output_index"],
+                "summary_index": 0,
+                "text": state["text"],
+            },
+        )
+        self.sse.send(
+            "response.reasoning_summary_part.done",
+            {
+                "item_id": state["id"],
+                "output_index": state["output_index"],
+                "summary_index": 0,
+                "part": part,
+            },
+        )
+        item = {"id": state["id"], "type": "reasoning", "summary": [part]}
+        self.output_slots[state["output_index"]] = item
+        self.sse.send(
+            "response.output_item.done",
+            {"output_index": state["output_index"], "item": item},
+        )
+        self.reasoning_state = None
+
+    def _start_text(self) -> None:
+        self._finish_reasoning()
+        item_id = f"msg_{uuid.uuid4().hex}"
+        index = self._allocate_index()
+        self.text_state = {"id": item_id, "output_index": index, "text": ""}
+        started = {
+            "id": item_id,
+            "type": "message",
+            "status": "in_progress",
+            "role": "assistant",
+            "content": [],
+        }
+        self.sse.send("response.output_item.added", {"output_index": index, "item": started})
+        self.sse.send(
+            "response.content_part.added",
+            {
+                "item_id": item_id,
+                "output_index": index,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []},
+            },
+        )
+
+    def _append_text(self, delta: str) -> None:
+        if not delta:
+            return
+        if self.text_state is None:
+            self._start_text()
+        state = self.text_state
+        assert state is not None
+        state["text"] += delta
+        self.sse.send(
+            "response.output_text.delta",
+            {
+                "item_id": state["id"],
+                "output_index": state["output_index"],
+                "content_index": 0,
+                "delta": delta,
+            },
+        )
+
+    def _finish_text(self) -> None:
+        state = self.text_state
+        if state is None:
+            return
+        part = {"type": "output_text", "text": state["text"], "annotations": []}
+        item = {
+            "id": state["id"],
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [part],
+        }
+        self.sse.send(
+            "response.output_text.done",
+            {
+                "item_id": state["id"],
+                "output_index": state["output_index"],
+                "content_index": 0,
+                "text": state["text"],
+            },
+        )
+        self.sse.send(
+            "response.content_part.done",
+            {
+                "item_id": state["id"],
+                "output_index": state["output_index"],
+                "content_index": 0,
+                "part": part,
+            },
+        )
+        self.output_slots[state["output_index"]] = item
+        self.sse.send(
+            "response.output_item.done",
+            {"output_index": state["output_index"], "item": item},
+        )
+        self.text_state = None
+
+    @staticmethod
+    def _could_be_fallback_prefix(text: str) -> bool:
+        stripped = text.lstrip()
+        if not stripped:
+            return True
+        lowered = stripped.lower()
+        if lowered.startswith("{") or lowered.startswith("```"):
+            return True
+        return any(prefix.startswith(lowered) for prefix in ("```", "```json"))
+
+    def append_content(self, delta: str) -> None:
+        if not delta:
+            return
+        self.content_chars += len(delta)
+        if self.content_mode == "text":
+            self._append_text(delta)
+            return
+        self.pending_content += delta
+        if not self._could_be_fallback_prefix(self.pending_content):
+            self.content_mode = "text"
+            pending = self.pending_content
+            self.pending_content = ""
+            self._append_text(pending)
+
+    def _start_function_tool(self, state: Dict[str, Any]) -> None:
+        self._finish_reasoning()
+        self._finish_text()
+        index = self._allocate_index()
+        state["output_index"] = index
+        state["started"] = True
+        started = {
+            "id": state["id"],
+            "type": "function_call",
+            "status": "in_progress",
+            "call_id": state["call_id"],
+            "name": state["name"],
+            "arguments": "",
+        }
+        self.sse.send("response.output_item.added", {"output_index": index, "item": started})
+
+    def append_tool(self, event: Dict[str, Any]) -> None:
+        index = int(event.get("index") or 0)
+        state = self.tool_states.setdefault(
+            index,
+            {
+                "id": f"fc_{uuid.uuid4().hex}",
+                "call_id": event.get("call_id") or f"call_{uuid.uuid4().hex}",
+                "name": "",
+                "arguments": "",
+                "started": False,
+            },
+        )
+        if event.get("call_id") and not state["started"]:
+            state["call_id"] = event["call_id"]
+        state["name"] += str(event.get("name_delta") or "")
+        arguments_delta = str(event.get("arguments_delta") or "")
+        state["arguments"] += arguments_delta
+        if not state["started"] and arguments_delta and state["name"] not in self.custom_names:
+            self._start_function_tool(state)
+        if state["started"] and arguments_delta:
+            self.sse.send(
+                "response.function_call_arguments.delta",
+                {
+                    "item_id": state["id"],
+                    "output_index": state["output_index"],
+                    "delta": arguments_delta,
+                },
+            )
+
+    @staticmethod
+    def _custom_input(arguments: str) -> str:
+        try:
+            parsed = json.loads(arguments or "{}")
+            return str(parsed.get("input", "")) if isinstance(parsed, dict) else str(parsed)
+        except ValueError:
+            return arguments or ""
+
+    def _finish_tool(self, state: Dict[str, Any]) -> None:
+        custom = state["name"] in self.custom_names
+        if custom:
+            self._finish_reasoning()
+            self._finish_text()
+            index = self._allocate_index()
+            custom_input = self._custom_input(state["arguments"])
+            started = {
+                "id": state["id"],
+                "type": "custom_tool_call",
+                "status": "in_progress",
+                "call_id": state["call_id"],
+                "name": state["name"],
+                "input": "",
+            }
+            self.sse.send("response.output_item.added", {"output_index": index, "item": started})
+            if custom_input:
+                self.sse.send(
+                    "response.custom_tool_call_input.delta",
+                    {
+                        "item_id": state["id"],
+                        "call_id": state["call_id"],
+                        "output_index": index,
+                        "delta": custom_input,
+                    },
+                )
+            item = dict(started)
+            item["status"] = "completed"
+            item["input"] = custom_input
+            self.sse.send(
+                "response.custom_tool_call_input.done",
+                {"item_id": state["id"], "output_index": index, "input": custom_input},
+            )
+        else:
+            if not state["started"]:
+                self._start_function_tool(state)
+                arguments = state["arguments"] or "{}"
+                self.sse.send(
+                    "response.function_call_arguments.delta",
+                    {
+                        "item_id": state["id"],
+                        "output_index": state["output_index"],
+                        "delta": arguments,
+                    },
+                )
+            index = int(state["output_index"])
+            arguments = state["arguments"] or "{}"
+            item = {
+                "id": state["id"],
+                "type": "function_call",
+                "status": "completed",
+                "call_id": state["call_id"],
+                "name": state["name"],
+                "arguments": arguments,
+            }
+            self.sse.send(
+                "response.function_call_arguments.done",
+                {
+                    "item_id": state["id"],
+                    "name": state["name"],
+                    "output_index": index,
+                    "arguments": arguments,
+                },
+            )
+        self.output_slots[index] = item
+        self.sse.send("response.output_item.done", {"output_index": index, "item": item})
+
+    def process(self, event: Dict[str, Any]) -> None:
+        kind = event.get("kind")
+        if kind == "reasoning":
+            self.append_reasoning(str(event.get("delta") or ""))
+        elif kind == "content":
+            self.append_content(str(event.get("delta") or ""))
+        elif kind == "tool":
+            self.append_tool(event)
+        elif kind == "finish":
+            self.finish_reason = str(event.get("reason") or "") or self.finish_reason
+        elif kind == "usage" and isinstance(event.get("usage"), dict):
+            self.usage = dict(event["usage"])
+
+    def finalize(self) -> List[Dict[str, Any]]:
+        if self.content_mode == "undecided" and self.pending_content:
+            calls = [] if self.tool_states else parse_fallback_calls(self.pending_content, self.allowed_tools)
+            if calls:
+                self.used_fallback_tool = True
+                for index, state in enumerate(calls):
+                    state["started"] = False
+                    self.tool_states[index] = state
+                self.pending_content = ""
+            else:
+                pending = self.pending_content
+                self.pending_content = ""
+                self.content_mode = "text"
+                self._append_text(pending)
+        self._finish_reasoning()
+        self._finish_text()
+        for _, state in sorted(self.tool_states.items()):
+            self._finish_tool(state)
+        return self.completed_output()
+
+    def completed_output(self) -> List[Dict[str, Any]]:
+        return [self.output_slots[index] for index in sorted(self.output_slots)]
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -864,12 +1318,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "close")
                 self.end_headers()
-                while True:
-                    chunk = response.read(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
+                if "text/event-stream" in response.headers.get("Content-Type", "").lower():
+                    while True:
+                        chunk = response.readline()
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                else:
+                    reader = getattr(response, "read1", None) or response.read
+                    while True:
+                        chunk = reader(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
         except urllib.error.HTTPError as exc:
             self._json(exc.code, {"error": "upstream_error", "detail": exc.read().decode("utf-8", "replace")})
         except Exception as exc:
@@ -893,7 +1356,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         sse = SseWriter(self)
         response_id = f"resp_{uuid.uuid4().hex}"
-        output: List[Dict[str, Any]] = []
         sse.send(
             "response.created",
             {"response": base_response(body, response_id, "in_progress", [])},
@@ -903,44 +1365,59 @@ class GatewayHandler(BaseHTTPRequestHandler):
             {"response": base_response(body, response_id, "in_progress", [])},
         )
 
+        bridge = ResponsesStreamBridge(sse, body, chat)
         try:
-            content, tool_states, reasoning, finish_reason = collect_chat_completion(chat)
+            for event in iter_chat_completion(chat):
+                bridge.process(event)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
-            failed = base_response(body, response_id, "failed", output)
+            failed = base_response(body, response_id, "failed", bridge.completed_output())
             failed["error"] = {"code": "upstream_error", "message": f"HTTP {exc.code}: {detail}"}
             sse.send("response.failed", {"response": failed})
             return
         except Exception as exc:
-            failed = base_response(body, response_id, "failed", output)
+            failed = base_response(body, response_id, "failed", bridge.completed_output())
             failed["error"] = {"code": "gateway_error", "message": str(exc)}
             sse.send("response.failed", {"response": failed})
             log(f"responses failure: {exc}\n{traceback.format_exc()}")
             return
 
-        allowed = [tool["function"]["name"] for tool in chat.get("tools", [])]
-        if not tool_states and allowed:
-            for index, state in enumerate(parse_fallback_calls(content, allowed)):
-                tool_states[index] = state
-            if tool_states:
-                content = ""
-
-        if content:
-            self._emit_text(sse, output, content)
-        custom_names = {
-            str(tool.get("name"))
-            for tool in body.get("tools") or []
-            if isinstance(tool, dict) and tool.get("type") == "custom" and tool.get("name")
-        }
-        for _, state in sorted(tool_states.items()):
-            self._emit_tool(sse, output, state, state.get("name") in custom_names)
+        output = bridge.finalize()
         completed = base_response(body, response_id, "completed", output)
-        if reasoning:
-            completed["metadata"]["pcl_reasoning_chars"] = len(reasoning)
+        effort = reasoning_effort_policy(body)
+        completed["metadata"].update(
+            {
+                "pcl_reasoning_chars": str(bridge.reasoning_chars),
+                "pcl_reasoning_transport": "upstream_reasoning_content_as_summary",
+                "pcl_reasoning_effort_requested": effort["requested"],
+                "pcl_reasoning_effort_effective": effort["effective"],
+                "pcl_reasoning_effort_mode": effort["mode"],
+                "pcl_reasoning_effort_native_supported": effort["native_supported"],
+                "pcl_tool_stream": (
+                    "strict_json_fallback"
+                    if bridge.used_fallback_tool
+                    else ("native_delta" if bridge.tool_states else "none")
+                ),
+                "pcl_tool_fallback": "true" if bridge.used_fallback_tool else "false",
+            }
+        )
+        if bridge.usage:
+            prompt_tokens = int(bridge.usage.get("prompt_tokens") or 0)
+            completion_tokens = int(bridge.usage.get("completion_tokens") or 0)
+            details = bridge.usage.get("completion_tokens_details") or {}
+            reasoning_tokens = int(details.get("reasoning_tokens") or 0) if isinstance(details, dict) else 0
+            completed["usage"] = {
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
+                "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
+                "total_tokens": int(bridge.usage.get("total_tokens") or prompt_tokens + completion_tokens),
+            }
         log(
             "responses completed "
-            f"model={body.get('model')} finish={finish_reason} content={len(content)} "
-            f"reasoning={len(reasoning)} tools={len(tool_states)}"
+            f"model={body.get('model')} finish={bridge.finish_reason} content={bridge.content_chars} "
+            f"reasoning={bridge.reasoning_chars} tools={len(bridge.tool_states)} "
+            f"effort={effort['requested']}->{effort['effective']}:{effort['mode']} "
+            f"fallback={bridge.used_fallback_tool}"
         )
         sse.send("response.completed", {"response": completed})
 
@@ -1007,103 +1484,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
             "responses compact v2 completed "
             f"model={body.get('model')} summary={len(summary)}"
         )
-
-    @staticmethod
-    def _emit_text(sse: SseWriter, output: List[Dict[str, Any]], text: str) -> None:
-        item_id = f"msg_{uuid.uuid4().hex}"
-        index = len(output)
-        started = {"id": item_id, "type": "message", "status": "in_progress", "role": "assistant", "content": []}
-        sse.send("response.output_item.added", {"output_index": index, "item": started})
-        sse.send(
-            "response.content_part.added",
-            {
-                "item_id": item_id,
-                "output_index": index,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-            },
-        )
-        sse.send(
-            "response.output_text.delta",
-            {"item_id": item_id, "output_index": index, "content_index": 0, "delta": text},
-        )
-        part = {"type": "output_text", "text": text, "annotations": []}
-        item = {"id": item_id, "type": "message", "status": "completed", "role": "assistant", "content": [part]}
-        output.append(item)
-        sse.send(
-            "response.output_text.done",
-            {"item_id": item_id, "output_index": index, "content_index": 0, "text": text},
-        )
-        sse.send(
-            "response.content_part.done",
-            {"item_id": item_id, "output_index": index, "content_index": 0, "part": part},
-        )
-        sse.send("response.output_item.done", {"output_index": index, "item": item})
-
-    @staticmethod
-    def _emit_tool(
-        sse: SseWriter,
-        output: List[Dict[str, Any]],
-        state: Dict[str, Any],
-        custom: bool = False,
-    ) -> None:
-        index = len(output)
-        if custom:
-            try:
-                parsed = json.loads(state["arguments"] or "{}")
-                custom_input = parsed.get("input", "") if isinstance(parsed, dict) else str(parsed)
-            except ValueError:
-                custom_input = state["arguments"] or ""
-            started = {
-                "id": state["id"],
-                "type": "custom_tool_call",
-                "status": "in_progress",
-                "call_id": state["call_id"],
-                "name": state["name"],
-                "input": "",
-            }
-            sse.send("response.output_item.added", {"output_index": index, "item": started})
-            sse.send(
-                "response.custom_tool_call_input.delta",
-                {"item_id": state["id"], "output_index": index, "delta": custom_input},
-            )
-            item = dict(started)
-            item["status"] = "completed"
-            item["input"] = custom_input
-            output.append(item)
-            sse.send(
-                "response.custom_tool_call_input.done",
-                {"item_id": state["id"], "output_index": index, "input": custom_input},
-            )
-            sse.send("response.output_item.done", {"output_index": index, "item": item})
-            return
-        started = {
-            "id": state["id"],
-            "type": "function_call",
-            "status": "in_progress",
-            "call_id": state["call_id"],
-            "name": state["name"],
-            "arguments": "",
-        }
-        sse.send("response.output_item.added", {"output_index": index, "item": started})
-        sse.send(
-            "response.function_call_arguments.delta",
-            {"item_id": state["id"], "output_index": index, "delta": state["arguments"] or "{}"},
-        )
-        item = dict(started)
-        item["status"] = "completed"
-        item["arguments"] = state["arguments"] or "{}"
-        output.append(item)
-        sse.send(
-            "response.function_call_arguments.done",
-            {
-                "item_id": state["id"],
-                "name": state["name"],
-                "output_index": index,
-                "arguments": item["arguments"],
-            },
-        )
-        sse.send("response.output_item.done", {"output_index": index, "item": item})
 
     def log_message(self, fmt: str, *args: Any) -> None:
         log(f"{self.client_address[0]} {fmt % args}")

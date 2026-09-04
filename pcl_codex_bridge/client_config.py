@@ -127,6 +127,7 @@ def managed_block(
     standalone: bool = False,
     include_agents_table: bool = True,
     include_v2_table: bool = True,
+    registry: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Return the non-root TOML owned by PCL Relay.
 
@@ -154,7 +155,7 @@ def managed_block(
         lines.insert(lines.index('[mcp_servers.pcl_relay.env]') + 1, f"PYTHONPATH = {json.dumps(mcp_module_root)}")
     if include_agents_table:
         insert_at = lines.index(END)
-        default = next(iter(configured_agents().values()), {"model": "DeepSeek-V4-Pro"})["model"]
+        default = next(iter(configured_agents(registry).values()), {"model": "DeepSeek-V4-Pro"})["model"]
         lines[insert_at:insert_at] = [
             "",
             "[agents]",
@@ -407,6 +408,7 @@ def install_client_config(
         standalone,
         include_agents_table=not has_agents_table,
         include_v2_table=not has_v2_table,
+        registry=registry,
     )
     updated = native_root_block(port, catalog) + "\n\n" + base.strip() + "\n\n" + block + "\n"
     backup_path = backup(config) if updated != original else None

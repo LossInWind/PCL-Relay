@@ -1,7 +1,7 @@
 import unittest
 from unittest import mock
 
-from pcl_codex_bridge import client_config
+from pcl_codex_bridge import model_detection
 from pcl_codex_bridge.models import AGENTS
 
 
@@ -14,11 +14,11 @@ class DetectionTests(unittest.TestCase):
             ]
         }
         with (
-            mock.patch.object(client_config, "request_json", return_value=payload),
-            mock.patch.object(client_config, "load_registry", return_value={}),
-            mock.patch.object(client_config, "save_registry") as save,
+            mock.patch.object(model_detection, "request_json", return_value=payload),
+            mock.patch.object(model_detection, "load_registry", return_value={}),
+            mock.patch.object(model_detection, "save_registry") as save,
         ):
-            report = client_config.discover_models("http://tailnet:15722/v1")
+            report = model_detection.discover_models("http://tailnet:15722/v1")
         self.assertTrue(report["available_models"]["Qwen3.6-35B"]["agent_eligible"])
         self.assertEqual(report["available_models"]["Qwen3.6-35B"]["family"], "Qwen")
         self.assertFalse(report["available_models"]["bge-m3"]["agent_eligible"])
@@ -45,12 +45,12 @@ class DetectionTests(unittest.TestCase):
             return tool if body and body.get("tools") else chat
 
         with (
-            mock.patch.object(client_config, "request_json", side_effect=fake_json),
-            mock.patch.object(client_config, "request_stream_probe", return_value=True),
-            mock.patch.object(client_config, "load_registry", return_value={"selected_agents": ["pcl_glm"]}),
-            mock.patch.object(client_config, "save_registry"),
+            mock.patch.object(model_detection, "request_json", side_effect=fake_json),
+            mock.patch.object(model_detection, "request_stream_probe", return_value=True),
+            mock.patch.object(model_detection, "load_registry", return_value={"selected_agents": ["pcl_glm"]}),
+            mock.patch.object(model_detection, "save_registry"),
         ):
-            report = client_config.detect_models("http://tailnet:15722/v1")
+            report = model_detection.detect_models("http://tailnet:15722/v1")
 
         self.assertTrue(report["all_chat_ready"])
         self.assertTrue(report["all_stream_ready"])
@@ -69,13 +69,13 @@ class DetectionTests(unittest.TestCase):
             return chat
 
         with (
-            mock.patch.object(client_config, "request_json", side_effect=fake_json),
-            mock.patch.object(client_config, "request_stream_probe", return_value=True),
-            mock.patch.object(client_config, "request_responses_tool_probe", return_value=True),
-            mock.patch.object(client_config, "load_registry", return_value={}),
-            mock.patch.object(client_config, "save_registry"),
+            mock.patch.object(model_detection, "request_json", side_effect=fake_json),
+            mock.patch.object(model_detection, "request_stream_probe", return_value=True),
+            mock.patch.object(model_detection, "request_responses_tool_probe", return_value=True),
+            mock.patch.object(model_detection, "load_registry", return_value={}),
+            mock.patch.object(model_detection, "save_registry"),
         ):
-            report = client_config.detect_models("http://tailnet:15722/v1")
+            report = model_detection.detect_models("http://tailnet:15722/v1")
 
         self.assertFalse(report["all_native_tools"])
         self.assertTrue(report["all_tool_compatible"])

@@ -1,4 +1,3 @@
-import json
 import os
 import tempfile
 import unittest
@@ -7,22 +6,19 @@ from unittest import mock
 
 from pcl_codex_bridge.client_config import (
     BEGIN,
-    END,
     ROOT_BEGIN,
     ROOT_END,
-    INSTALL_ROOT,
     _make_tree_owner_writable,
     choose_native_router_port,
     combined_catalog,
     configured_native_router_port,
-    find_tailscale,
     install_client_config,
     install_source_tree,
     managed_block,
-    strip_managed_block,
     uninstall_client_config,
 )
 from pcl_codex_bridge.models import AGENTS, model_catalog
+from pcl_codex_bridge.relay_discovery import find_tailscale
 
 
 class ClientConfigTests(unittest.TestCase):
@@ -89,8 +85,8 @@ class ClientConfigTests(unittest.TestCase):
             executable.chmod(0o755)
             with (
                 mock.patch.dict(os.environ, {"PCL_TAILSCALE_BIN": ""}, clear=False),
-                mock.patch("pcl_codex_bridge.client_config.shutil.which", return_value=None),
-                mock.patch("pcl_codex_bridge.client_config.TAILSCALE_CANDIDATES", (executable,)),
+                mock.patch("pcl_codex_bridge.relay_discovery.shutil.which", return_value=None),
+                mock.patch("pcl_codex_bridge.relay_discovery.TAILSCALE_CANDIDATES", (executable,)),
             ):
                 self.assertEqual(find_tailscale(), str(executable))
 
@@ -101,7 +97,7 @@ class ClientConfigTests(unittest.TestCase):
             executable.chmod(0o755)
             with (
                 mock.patch.dict(os.environ, {"PCL_TAILSCALE_BIN": str(executable)}),
-                mock.patch("pcl_codex_bridge.client_config.shutil.which", return_value="/bin/false"),
+                mock.patch("pcl_codex_bridge.relay_discovery.shutil.which", return_value="/bin/false"),
             ):
                 self.assertEqual(find_tailscale(), str(executable))
 

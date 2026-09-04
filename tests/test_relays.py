@@ -1,10 +1,12 @@
+import json
 import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
 from unittest import mock
 
-from pcl_codex_bridge.client_config import discover_relays, managed_block, select_relay
+from pcl_codex_bridge.client_config import managed_block, select_relay
+from pcl_codex_bridge.relay_discovery import discover_relays
 
 
 class RelayDiscoveryTests(unittest.TestCase):
@@ -29,10 +31,10 @@ class RelayDiscoveryTests(unittest.TestCase):
             raise urllib.error.URLError("not a relay")
 
         with (
-            mock.patch("pcl_codex_bridge.client_config._tailscale_status", return_value=tailscale),
-            mock.patch("pcl_codex_bridge.client_config.request_json", side_effect=request),
-            mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={"gateway": "http://relay.tail.test:15722/v1"}),
-            mock.patch("pcl_codex_bridge.client_config.save_registry"),
+            mock.patch("pcl_codex_bridge.relay_discovery._tailscale_status", return_value=tailscale),
+            mock.patch("pcl_codex_bridge.relay_discovery.request_json", side_effect=request),
+            mock.patch("pcl_codex_bridge.relay_discovery.load_registry", return_value={"gateway": "http://relay.tail.test:15722/v1"}),
+            mock.patch("pcl_codex_bridge.relay_discovery.save_registry"),
         ):
             result = discover_relays(timeout=0.1)
         relay = next(item for item in result["nodes"] if item["node_name"] == "relay")
@@ -47,12 +49,15 @@ class RelayDiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
             home.mkdir()
+            registry_file = Path(temp) / "models.json"
+            registry_file.write_text(json.dumps(registry), encoding="utf-8")
             config = home / "config.toml"
             config.write_text('model = "gpt-5.6-sol"\nmodel_provider = "openai"\n', encoding="utf-8")
             with (
-                mock.patch.dict("os.environ", {"CODEX_HOME": str(home)}),
-                mock.patch("pcl_codex_bridge.client_config.load_registry", return_value=registry),
-                mock.patch("pcl_codex_bridge.client_config.save_registry"),
+                mock.patch.dict(
+                    "os.environ",
+                    {"CODEX_HOME": str(home), "PCL_CODEX_REGISTRY": str(registry_file)},
+                ),
                 mock.patch("pcl_codex_bridge.client_config.request_json", side_effect=[
                     {"status": "ok", "service": "pcl-codex-gateway"},
                     {"data": [{"id": "GLM-5.2"}]},
@@ -60,11 +65,13 @@ class RelayDiscoveryTests(unittest.TestCase):
             ):
                 result = select_relay("http://new.tail.test:15722/v1")
             updated = config.read_text(encoding="utf-8")
+            updated_registry = json.loads(registry_file.read_text(encoding="utf-8"))
         self.assertIn('model = "gpt-5.6-sol"', updated)
         self.assertIn('model_provider = "openai"', updated)
         self.assertIn('openai_base_url = "http://127.0.0.1:15724/v1"', updated)
         self.assertIn('PCL_CODEX_GATEWAY_URL = "http://new.tail.test:15722/v1"', updated)
         self.assertNotIn('[model_providers.pcl_internal]', updated)
+        self.assertEqual(updated_registry["gateway"], "http://new.tail.test:15722/v1")
         self.assertTrue(result["main_provider_preserved"])
 
     def test_no_proxy_tracks_selected_gateway(self):

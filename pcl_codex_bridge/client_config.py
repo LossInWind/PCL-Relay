@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import concurrent.futures
 import os
 import plistlib
 import re
@@ -10,15 +9,12 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .models import (
-    AGENTS,
     DEFAULT_GATEWAY_URL,
     available_model_records,
     codex_home,
@@ -30,6 +26,8 @@ from .models import (
 )
 from .native_router import DEFAULT_PORT as NATIVE_ROUTER_DEFAULT_PORT
 from .native_router import PCL_MODEL_PREFIX, SERVICE_NAME as NATIVE_ROUTER_SERVICE
+from .http_client import gateway_root, request_json
+from .relay_discovery import find_tailscale
 from .zstd_codec import library_source as zstd_library_source
 
 
@@ -46,19 +44,6 @@ NATIVE_STATE_ROOT = Path.home() / ".local" / "state" / "pcl-codex-bridge"
 NATIVE_LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "cn.haichen.pcl-relay-router.plist"
 NATIVE_SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / "pcl-relay-router.service"
 AGENT_ROLE_MARKER = "# >>> pcl-relay managed native agent role v2 >>>"
-TAILSCALE_CANDIDATES = (
-    Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
-    Path.home() / "Applications" / "Tailscale.app" / "Contents" / "MacOS" / "Tailscale",
-    Path("/opt/homebrew/bin/tailscale"),
-    Path("/usr/local/bin/tailscale"),
-    Path("/usr/bin/tailscale"),
-)
-
-
-def gateway_root(url: str = DEFAULT_GATEWAY_URL) -> str:
-    return url.rstrip("/")
-
-
 def _make_tree_owner_writable(root: Path) -> None:
     """Normalize files copied from the signed, read-only macOS app bundle."""
     if not root.exists():
@@ -794,184 +779,6 @@ def uninstall_native_router_service() -> Dict[str, Any]:
     return {"stopped": stopped, "health": native_router_health(timeout=1)}
 
 
-def request_json(url: str, body: Optional[Dict[str, Any]] = None, timeout: int = 60) -> Any:
-    raw = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
-    request = urllib.request.Request(
-        url,
-        data=raw,
-        method="POST" if body is not None else "GET",
-        headers={"Content-Type": "application/json"},
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def find_tailscale() -> Optional[str]:
-    """Locate the Tailscale CLI even when a macOS app has a minimal PATH."""
-    candidates: List[Path] = []
-    override = os.environ.get("PCL_TAILSCALE_BIN", "").strip()
-    if override:
-        candidates.append(Path(override).expanduser())
-    found = shutil.which("tailscale")
-    if found:
-        candidates.append(Path(found))
-    candidates.extend(TAILSCALE_CANDIDATES)
-
-    seen = set()
-    for candidate in candidates:
-        path = str(candidate)
-        if path in seen:
-            continue
-        seen.add(path)
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return path
-    return None
-
-
-def _tailscale_status() -> Dict[str, Any]:
-    executable = find_tailscale()
-    if not executable:
-        raise RuntimeError(
-            "Tailscale CLI is not installed or could not be found; "
-            "install Tailscale.app or set PCL_TAILSCALE_BIN"
-        )
-    result = subprocess.run(
-        [executable, "status", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "Tailscale is not connected")
-    payload = json.loads(result.stdout)
-    if not isinstance(payload, dict):
-        raise RuntimeError("Tailscale returned an invalid status document")
-    return payload
-
-
-def _tailnet_nodes(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    nodes: List[Dict[str, Any]] = []
-    raw_nodes: List[tuple[Dict[str, Any], bool]] = []
-    self_node = payload.get("Self")
-    if isinstance(self_node, dict):
-        raw_nodes.append((self_node, True))
-    peers = payload.get("Peer")
-    if isinstance(peers, dict):
-        raw_nodes.extend((value, False) for value in peers.values() if isinstance(value, dict))
-    elif isinstance(peers, list):
-        raw_nodes.extend((value, False) for value in peers if isinstance(value, dict))
-
-    seen = set()
-    for node, is_self in raw_nodes:
-        addresses = node.get("TailscaleIPs") if isinstance(node.get("TailscaleIPs"), list) else []
-        ipv4 = next((str(value) for value in addresses if ":" not in str(value)), "")
-        if not ipv4 or ipv4 in seen:
-            continue
-        seen.add(ipv4)
-        dns_name = str(node.get("DNSName") or "").rstrip(".")
-        nodes.append(
-            {
-                "node_name": str(node.get("HostName") or dns_name or ipv4),
-                "magic_dns": dns_name,
-                "tailscale_ip": ipv4,
-                "online": True if is_self else bool(node.get("Online")),
-                "self": is_self,
-            }
-        )
-    return nodes
-
-
-def _probe_relay(node: Dict[str, Any], port: int, timeout: float, selected_url: str) -> Dict[str, Any]:
-    record = dict(node)
-    host = record.get("magic_dns") or record["tailscale_ip"]
-    gateway_url = f"http://{host}:{port}/v1"
-    record.update(
-        {
-            "gateway_url": gateway_url,
-            "gateway": False,
-            "pcl_auth": "not_checked",
-            "model_count": 0,
-            "latency_ms": None,
-            "selected": urllib.parse.urlparse(selected_url).hostname in {
-                record.get("magic_dns"),
-                record.get("tailscale_ip"),
-            },
-            "error": "",
-        }
-    )
-    if not record["online"]:
-        record["error"] = "tailnet_offline"
-        return record
-    started = time.monotonic()
-    try:
-        health = request_json(gateway_url.rsplit("/v1", 1)[0] + "/healthz", timeout=timeout)
-        if not isinstance(health, dict) or health.get("status") != "ok":
-            raise RuntimeError("not a PCL relay")
-        upstream = str(health.get("upstream") or "")
-        service = str(health.get("service") or "")
-        if service and service != "pcl-codex-gateway":
-            raise RuntimeError("unexpected service identity")
-        if upstream and "llmapi.pcl.ac.cn" not in upstream:
-            raise RuntimeError("unexpected upstream")
-        record["gateway"] = True
-        record["service"] = service or "pcl-codex-gateway"
-        record["version"] = str(health.get("version") or "legacy")
-        models = request_json(gateway_url + "/models", timeout=max(timeout, 8))
-        entries = models.get("data") if isinstance(models, dict) else None
-        record["model_count"] = len(entries) if isinstance(entries, list) else 0
-        record["pcl_auth"] = "valid"
-    except urllib.error.HTTPError as exc:
-        record["pcl_auth"] = "invalid" if exc.code in {401, 403} else "upstream_error"
-        record["error"] = f"http_{exc.code}"
-    except Exception as exc:
-        record["error"] = f"{type(exc).__name__}: {exc}"
-    record["latency_ms"] = int((time.monotonic() - started) * 1000)
-    return record
-
-
-def discover_relays(port: int = 15722, timeout: float = 2.0) -> Dict[str, Any]:
-    payload = _tailscale_status()
-    nodes = _tailnet_nodes(payload)
-    registry = load_registry()
-    selected_url = str(registry.get("gateway") or DEFAULT_GATEWAY_URL)
-    online = [node for node in nodes if node["online"]]
-    results: Dict[str, Dict[str, Any]] = {}
-    if online:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, len(online))) as pool:
-            futures = {
-                pool.submit(_probe_relay, node, port, timeout, selected_url): node["tailscale_ip"]
-                for node in online
-            }
-            for future in concurrent.futures.as_completed(futures):
-                results[futures[future]] = future.result()
-    for node in nodes:
-        if node["tailscale_ip"] not in results:
-            results[node["tailscale_ip"]] = _probe_relay(node, port, timeout, selected_url)
-    ordered = sorted(
-        results.values(),
-        key=lambda item: (
-            not bool(item.get("selected")),
-            not bool(item.get("gateway")),
-            not bool(item.get("online")),
-            str(item.get("node_name", "")).lower(),
-        ),
-    )
-    report = {
-        "tailnet_connected": True,
-        "selected_gateway": selected_url,
-        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "ready_count": sum(
-            1 for item in ordered if item.get("gateway") and item.get("pcl_auth") == "valid"
-        ),
-        "nodes": ordered,
-    }
-    registry["relay_discovery"] = report
-    save_registry(registry)
-    return report
-
-
 def select_relay(gateway_url: str) -> Dict[str, Any]:
     normalized = gateway_url.rstrip("/")
     if not normalized.endswith("/v1"):
@@ -1004,260 +811,6 @@ def select_relay(gateway_url: str) -> Dict[str, Any]:
         "config": config,
         "main_provider_preserved": True,
     }
-
-
-def request_stream_probe(url: str, body: Dict[str, Any], timeout: int = 120) -> bool:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    saw_chunk = False
-    saw_done = False
-    with opener.open(request, timeout=timeout) as response:
-        for raw_line in response:
-            line = raw_line.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                saw_done = True
-                continue
-            if not data:
-                continue
-            payload = json.loads(data)
-            if isinstance(payload, dict) and payload.get("choices"):
-                saw_chunk = True
-    return saw_chunk and saw_done
-
-
-def request_responses_tool_probe(url: str, body: Dict[str, Any], timeout: int = 120) -> bool:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=timeout) as response:
-        for raw_line in response:
-            line = raw_line.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if not data:
-                continue
-            payload = json.loads(data)
-            item = payload.get("item") if isinstance(payload, dict) else None
-            if isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"}:
-                return item.get("name") == "pcl_probe"
-    return False
-
-
-def model_ids(payload: Any) -> List[str]:
-    entries = payload.get("data", []) if isinstance(payload, dict) else []
-    result = []
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("id"):
-            result.append(str(entry["id"]))
-    return result
-
-
-def discover_models(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
-    payload = request_json(gateway_root(gateway_url) + "/models", timeout=30)
-    entries = payload.get("data", []) if isinstance(payload, dict) else []
-    records = available_model_records(entries)
-    registry = load_registry()
-    registry["gateway"] = gateway_url
-    registry["catalog_checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    registry["available_models"] = records
-    if not isinstance(registry.get("selected_agents"), list):
-        registry["selected_agents"] = list(AGENTS)
-    if not isinstance(registry.get("agent_definitions"), dict):
-        registry["agent_definitions"] = dict(AGENTS)
-    registry.setdefault("models", {})
-    save_registry(registry)
-    return registry
-
-
-def detect_models(gateway_url: str = DEFAULT_GATEWAY_URL, timeout: int = 120) -> Dict[str, Any]:
-    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    previous = load_registry()
-    definitions = configured_agents(previous)
-    selected = previous.get("selected_agents") if isinstance(previous, dict) else None
-    if not isinstance(selected, list):
-        selected = list(definitions)
-    report: Dict[str, Any] = {
-        "gateway": gateway_url,
-        "checked_at": now,
-        "catalog_checked_at": previous.get("catalog_checked_at"),
-        "selected_agents": [name for name in selected if name in definitions],
-        "agent_definitions": definitions,
-        "available_models": previous.get("available_models") or {},
-        "models": dict(previous.get("models") or {}),
-    }
-    try:
-        payload = request_json(gateway_root(gateway_url) + "/models", timeout=30)
-        advertised = model_ids(payload)
-        entries = payload.get("data", []) if isinstance(payload, dict) else []
-        report["available_models"] = available_model_records(entries)
-        report["catalog_checked_at"] = now
-    except Exception as exc:
-        report["error"] = f"model discovery failed: {exc}"
-        save_registry(report)
-        return report
-
-    for agent, info in definitions.items():
-        model = info["model"]
-        status: Dict[str, Any] = {
-            "agent": agent,
-            "model": model,
-            "advertised": model in advertised,
-            "chat": False,
-            "stream": False,
-            "tool_call": False,
-            "tool_compatible": False,
-            "tool_call_mode": "unavailable",
-            "execution_ready": False,
-            "error": "",
-        }
-        chat_body = {
-            "model": model,
-            "messages": [{"role": "user", "content": "Reply briefly with PCL_OK"}],
-            "stream": False,
-            "max_tokens": 64,
-        }
-        try:
-            chat = request_json(
-                gateway_root(gateway_url) + "/chat/completions",
-                chat_body,
-                timeout=min(timeout, 90),
-            )
-            status["chat"] = bool(isinstance(chat, dict) and chat.get("choices"))
-        except Exception as exc:
-            # Availability probes are read-only, so one bounded retry is safe.
-            try:
-                chat = request_json(
-                    gateway_root(gateway_url) + "/chat/completions",
-                    chat_body,
-                    timeout=min(timeout, 90),
-                )
-                status["chat"] = bool(isinstance(chat, dict) and chat.get("choices"))
-            except Exception as retry_exc:
-                status["error"] = f"chat: {retry_exc}"
-        if status["chat"]:
-            try:
-                stream_body = dict(chat_body)
-                stream_body["stream"] = True
-                status["stream"] = request_stream_probe(
-                    gateway_root(gateway_url) + "/chat/completions",
-                    stream_body,
-                    timeout=min(timeout, 120),
-                )
-                if not status["stream"]:
-                    status["error"] = (status["error"] + "; " if status["error"] else "") + "stream: incomplete SSE"
-            except Exception as exc:
-                status["error"] = (status["error"] + "; " if status["error"] else "") + f"stream: {exc}"
-            native_tool_error = ""
-            try:
-                tool = request_json(
-                    gateway_root(gateway_url) + "/chat/completions",
-                    {
-                        "model": model,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": "Call the probe tool with value PCL_TOOL_OK. Do not answer normally.",
-                            }
-                        ],
-                        "tools": [
-                            {
-                                "type": "function",
-                                "function": {
-                                    "name": "pcl_probe",
-                                    "description": "Capability probe",
-                                    "parameters": {
-                                        "type": "object",
-                                        "properties": {"value": {"type": "string"}},
-                                        "required": ["value"],
-                                    },
-                                },
-                            }
-                        ],
-                        "tool_choice": "auto",
-                        "stream": False,
-                        "max_tokens": 512,
-                    },
-                    timeout=min(timeout, 120),
-                )
-                message = (((tool.get("choices") or [{}])[0]).get("message") or {}) if isinstance(tool, dict) else {}
-                status["tool_call"] = bool(message.get("tool_calls"))
-            except Exception as exc:
-                native_tool_error = str(exc)
-
-            if status["tool_call"]:
-                status["tool_compatible"] = True
-                status["tool_call_mode"] = "native"
-            else:
-                responses_probe = {
-                    "model": model,
-                    "input": [
-                        {
-                            "type": "message",
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": "Call pcl_probe with value PCL_TOOL_OK. Do not answer normally.",
-                                }
-                            ],
-                        }
-                    ],
-                    "tools": [
-                        {
-                            "type": "function",
-                            "name": "pcl_probe",
-                            "description": "Capability probe",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {"value": {"type": "string"}},
-                                "required": ["value"],
-                            },
-                        }
-                    ],
-                    "tool_choice": "auto",
-                    "max_output_tokens": 512,
-                }
-                fallback_error = ""
-                for _ in range(2):
-                    try:
-                        status["tool_compatible"] = request_responses_tool_probe(
-                            gateway_root(gateway_url) + "/responses",
-                            responses_probe,
-                            timeout=min(timeout, 120),
-                        )
-                        if status["tool_compatible"]:
-                            break
-                    except Exception as exc:
-                        fallback_error = str(exc)
-                if status["tool_compatible"]:
-                    status["tool_call_mode"] = "json_fallback"
-                else:
-                    details = fallback_error or native_tool_error or "no tool call returned"
-                    status["error"] = (status["error"] + "; " if status["error"] else "") + f"tool: {details}"
-            status["execution_ready"] = bool(
-                status["chat"] and status["stream"] and status["tool_compatible"]
-            )
-        report["models"][agent] = status
-    selected_statuses = [report["models"][name] for name in report["selected_agents"] if name in report["models"]]
-    report["all_chat_ready"] = bool(selected_statuses) and all(item["chat"] for item in selected_statuses)
-    report["all_stream_ready"] = bool(selected_statuses) and all(item["stream"] for item in selected_statuses)
-    report["all_tool_compatible"] = bool(selected_statuses) and all(item["tool_compatible"] for item in selected_statuses)
-    report["all_native_tools"] = bool(selected_statuses) and all(item["tool_call"] for item in selected_statuses)
-    save_registry(report)
-    return report
 
 
 def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:

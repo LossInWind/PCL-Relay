@@ -12,23 +12,23 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .client_config import (
+    BIN_PATH,
     INSTALL_ROOT,
     UNSANDBOXED_MARKER,
-    detect_models,
-    discover_relays,
-    discover_models,
     doctor,
     install_client_config,
     install_native_router_service,
     install_source_tree,
     choose_native_router_port,
     native_router_health,
-    request_json,
     select_relay,
     uninstall_client_config,
     uninstall_native_router_service,
     write_native_catalog,
 )
+from .http_client import request_json
+from .model_detection import detect_models, discover_models
+from .relay_discovery import discover_relays
 from .models import (
     AGENTS,
     DEFAULT_GATEWAY_URL,

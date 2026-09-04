@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import struct
-import subprocess
 import urllib.parse
-from pathlib import Path
 from typing import Any, Dict
 
 from .models import DEFAULT_GATEWAY_URL, load_registry

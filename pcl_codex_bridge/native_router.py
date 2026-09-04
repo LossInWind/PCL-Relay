@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Tuple
 
 from . import __version__
 from .models import DEFAULT_GATEWAY_URL, load_registry

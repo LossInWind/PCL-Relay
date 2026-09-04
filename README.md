@@ -6,6 +6,8 @@ PCL Relay 是一个软件、一个安装包：它同时负责中转站、模型�
 
 源码仓库：[`LossInWind/PCL-Relay`](https://github.com/LossInWind/PCL-Relay)
 
+模块职责、依赖方向和新增功能落点见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
+
 ## 工作方式
 
 ```text

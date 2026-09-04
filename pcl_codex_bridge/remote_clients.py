@@ -9,7 +9,6 @@ import re
 import shlex
 import subprocess
 import tarfile
-import tempfile
 import time
 import urllib.parse
 import urllib.error
@@ -18,7 +17,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import __version__
-from .client_config import discover_relays, request_json
+from .http_client import request_json
+from .relay_discovery import discover_relays
 from .models import DEFAULT_GATEWAY_URL, load_registry
 
 

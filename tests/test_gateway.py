@@ -9,6 +9,15 @@ from pathlib import Path
 from unittest import mock
 
 from pcl_codex_bridge.gateway import (
+    GatewayHandler,
+    gateway_status,
+    portal_pac,
+    portal_target_allowed,
+    recent_logs,
+    record_topology_heartbeat,
+    topology_snapshot,
+)
+from pcl_codex_bridge.responses_protocol import (
     COMPACT_PROMPT,
     OPAQUE_COMPACTION_NOTE,
     SUMMARY_PREFIX,
@@ -17,18 +26,11 @@ from pcl_codex_bridge.gateway import (
     decode_compaction_summary,
     encode_compaction_summary,
     generate_compaction_summary,
-    GatewayHandler,
-    gateway_status,
     is_v2_compaction_request,
     parse_fallback_calls,
-    portal_pac,
-    portal_target_allowed,
-    recent_logs,
-    record_topology_heartbeat,
     reasoning_effort_policy,
     retained_compact_messages,
     responses_messages,
-    topology_snapshot,
 )
 
 
@@ -92,7 +94,7 @@ class GatewayMappingTests(unittest.TestCase):
         ]:
             with (
                 self.subTest(error=error),
-                mock.patch("pcl_codex_bridge.gateway.collect_chat_completion", return_value=result),
+                mock.patch("pcl_codex_bridge.responses_protocol.collect_chat_completion", return_value=result),
                 self.assertRaisesRegex(RuntimeError, error),
             ):
                 generate_compaction_summary({"model": "DeepSeek-V4-Pro", "input": []})

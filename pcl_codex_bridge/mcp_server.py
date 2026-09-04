@@ -8,7 +8,8 @@ import traceback
 from typing import Any, Dict
 
 from . import __version__
-from .client_config import detect_models, discover_models, doctor, native_router_health
+from .client_config import doctor, native_router_health
+from .model_detection import detect_models, discover_models
 from .models import DEFAULT_GATEWAY_URL, configured_agents, load_registry
 
 

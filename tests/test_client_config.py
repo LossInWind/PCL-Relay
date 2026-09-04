@@ -12,7 +12,9 @@ from pcl_codex_bridge.client_config import (
     ROOT_END,
     INSTALL_ROOT,
     _make_tree_owner_writable,
+    choose_native_router_port,
     combined_catalog,
+    configured_native_router_port,
     find_tailscale,
     install_client_config,
     install_source_tree,
@@ -24,6 +26,50 @@ from pcl_codex_bridge.models import AGENTS, model_catalog
 
 
 class ClientConfigTests(unittest.TestCase):
+    def test_configured_router_port_prefers_codex_source_of_truth(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            (home / "config.toml").write_text(
+                f'{ROOT_BEGIN}\nopenai_base_url = "http://127.0.0.1:15725/v1"\n{ROOT_END}\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}),
+                mock.patch("pcl_codex_bridge.client_config._managed_router_service_port", return_value=15724),
+                mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={"native_router_port": 15724}),
+            ):
+                self.assertEqual(configured_native_router_port(), 15725)
+
+    def test_choose_router_port_does_not_drift_during_managed_restart(self):
+        with (
+            mock.patch("pcl_codex_bridge.client_config.configured_native_router_port", return_value=15724),
+            mock.patch("pcl_codex_bridge.client_config._managed_router_service_port", return_value=15724),
+            mock.patch("pcl_codex_bridge.client_config.native_router_health", return_value={"reachable": False}),
+            mock.patch("pcl_codex_bridge.client_config._port_is_bindable", return_value=False),
+        ):
+            self.assertEqual(choose_native_router_port(), 15724)
+
+    def test_config_install_reports_real_port_migration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            config = home / "config.toml"
+            config.write_text(
+                f'{ROOT_BEGIN}\nopenai_base_url = "http://127.0.0.1:15724/v1"\n{ROOT_END}\n\nmodel = "gpt-5.6-sol"\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}),
+                mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
+                mock.patch("pcl_codex_bridge.client_config.save_registry"),
+            ):
+                result = install_client_config(router_port=15725)
+            self.assertTrue(result["router_port_changed"])
+            self.assertTrue(result["codex_reload_required"])
+            self.assertEqual(result["previous_router_port"], 15724)
+            self.assertIn("127.0.0.1:15725/v1", config.read_text(encoding="utf-8"))
+
     def test_signed_bundle_copy_is_made_writable_before_reinstall(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "pcl_codex_bridge"

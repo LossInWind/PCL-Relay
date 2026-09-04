@@ -2,7 +2,7 @@ import AppKit
 import BridgeCore
 import SwiftUI
 
-private enum AppSection: String, CaseIterable, Identifiable {
+enum AppSection: String, CaseIterable, Identifiable {
     case network = "网络"
     case models = "模型与 Agent"
     case portal = "PCL 门户"
@@ -1864,7 +1864,7 @@ private struct QuietButtonStyle: ButtonStyle {
     }
 }
 
-private func shortDeviceName(_ value: String) -> String {
+func shortDeviceName(_ value: String) -> String {
     value.replacingOccurrences(of: "haichen-", with: "")
 }
 

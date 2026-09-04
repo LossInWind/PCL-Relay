@@ -156,6 +156,7 @@ def install_client(args: argparse.Namespace) -> Dict[str, Any]:
     save_registry(registry)
     port = choose_native_router_port()
     service = install_native_router_service(port)
+    port = int(service["port"])
     result = install_client_config(args.gateway_url, router_port=port)
     result["install_root"] = str(INSTALL_ROOT)
     result["main_provider_preserved"] = True

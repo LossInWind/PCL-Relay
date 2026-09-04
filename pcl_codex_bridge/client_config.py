@@ -374,6 +374,73 @@ def backup(path: Path) -> Optional[Path]:
     return target
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        temporary.write_text(content, encoding="utf-8")
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode & 0o777)
+        else:
+            os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _router_port_from_config_text(content: str) -> Optional[int]:
+    managed = re.search(
+        re.escape(ROOT_BEGIN) + r"(?P<body>.*?)" + re.escape(ROOT_END),
+        content,
+        flags=re.DOTALL,
+    )
+    if not managed:
+        return None
+    match = re.search(
+        r'(?m)^\s*openai_base_url\s*=\s*"http://127\.0\.0\.1:(\d+)/v1"\s*$',
+        managed.group("body"),
+    )
+    return int(match.group(1)) if match else None
+
+
+def _managed_router_service_port() -> Optional[int]:
+    if sys.platform == "darwin" and NATIVE_LAUNCH_AGENT.exists():
+        try:
+            with NATIVE_LAUNCH_AGENT.open("rb") as handle:
+                payload = plistlib.load(handle)
+            environment = payload.get("EnvironmentVariables") or {}
+            if environment.get("PCL_RELAY_NATIVE_PORT"):
+                return int(environment["PCL_RELAY_NATIVE_PORT"])
+            arguments = payload.get("ProgramArguments") or []
+            if "--port" in arguments:
+                return int(arguments[arguments.index("--port") + 1])
+        except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+            return None
+    if sys.platform.startswith("linux") and NATIVE_SYSTEMD_UNIT.exists():
+        try:
+            content = NATIVE_SYSTEMD_UNIT.read_text(encoding="utf-8", errors="replace")
+            match = re.search(r"--port\s+(\d+)", content)
+            return int(match.group(1)) if match else None
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def configured_native_router_port() -> int:
+    config = codex_home() / "config.toml"
+    try:
+        configured = _router_port_from_config_text(config.read_text(encoding="utf-8"))
+    except OSError:
+        configured = None
+    if configured:
+        return configured
+    managed = _managed_router_service_port()
+    if managed:
+        return managed
+    registry = load_registry()
+    return int(registry.get("native_router_port") or NATIVE_ROUTER_DEFAULT_PORT)
+
+
 def install_client_config(
     gateway_url: str = DEFAULT_GATEWAY_URL,
     router_port: Optional[int] = None,
@@ -385,6 +452,7 @@ def install_client_config(
     home.mkdir(parents=True, exist_ok=True)
     config = home / "config.toml"
     original = config.read_text(encoding="utf-8") if config.exists() else ""
+    previous_port = _router_port_from_config_text(original)
     base = strip_native_root_block(strip_managed_block(original))
     conflicts = _root_key_conflicts(base)
     if conflicts:
@@ -412,7 +480,8 @@ def install_client_config(
     )
     updated = native_root_block(port, catalog) + "\n\n" + base.strip() + "\n\n" + block + "\n"
     backup_path = backup(config) if updated != original else None
-    config.write_text(updated, encoding="utf-8")
+    if updated != original:
+        _atomic_write_text(config, updated)
 
     # Remove files from the former out-of-process/MCP delegation design after
     # the native catalog has been written successfully.
@@ -428,6 +497,9 @@ def install_client_config(
         "delegation": "native_spawn_agent",
         "native_roles": roles,
         "backup": str(backup_path) if backup_path else "",
+        "previous_router_port": previous_port,
+        "router_port_changed": previous_port is not None and previous_port != port,
+        "codex_reload_required": previous_port is None or previous_port != port,
     }
 
 
@@ -491,9 +563,13 @@ def native_router_health(port: Optional[int] = None, timeout: float = 3.0) -> Di
 
 
 def choose_native_router_port() -> int:
-    registry = load_registry()
-    saved = int(registry.get("native_router_port") or NATIVE_ROUTER_DEFAULT_PORT)
-    if native_router_health(saved, timeout=1).get("reachable") or _port_is_bindable(saved):
+    saved = configured_native_router_port()
+    managed = _managed_router_service_port()
+    if (
+        native_router_health(saved, timeout=1).get("reachable")
+        or _port_is_bindable(saved)
+        or managed == saved
+    ):
         return saved
     for port in range(NATIVE_ROUTER_DEFAULT_PORT, NATIVE_ROUTER_DEFAULT_PORT + 100):
         if _port_is_bindable(port):
@@ -530,7 +606,6 @@ def install_native_router_service(port: Optional[int] = None) -> Dict[str, Any]:
     selected_port = int(port or choose_native_router_port())
     proxy = detect_official_proxy()
     registry = load_registry()
-    registry["native_router_port"] = selected_port
     registry["official_proxy"] = proxy
     save_registry(registry)
     NATIVE_STATE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -540,6 +615,29 @@ def install_native_router_service(port: Optional[int] = None) -> Dict[str, Any]:
     warning = ""
 
     if sys.platform == "darwin":
+        domain = f"gui/{os.getuid()}"
+        subprocess.run(
+            ["launchctl", "bootout", f"{domain}/cn.haichen.pcl-relay-router"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        # A managed router can take a moment to release its listener. Reuse the
+        # configured port instead of treating that normal shutdown window as a
+        # reason to migrate Codex to another port.
+        for _ in range(20):
+            if _port_is_bindable(selected_port):
+                break
+            time.sleep(0.1)
+        if not _port_is_bindable(selected_port):
+            for candidate in range(NATIVE_ROUTER_DEFAULT_PORT, NATIVE_ROUTER_DEFAULT_PORT + 100):
+                if _port_is_bindable(candidate):
+                    warning = f"Preferred port {selected_port} is owned by another process; using {candidate}"
+                    selected_port = candidate
+                    break
+            else:
+                raise RuntimeError("No free loopback port is available for the PCL Relay native router")
         NATIVE_LAUNCH_AGENT.parent.mkdir(parents=True, exist_ok=True)
         payload: Dict[str, Any] = {
             "Label": "cn.haichen.pcl-relay-router",
@@ -557,14 +655,6 @@ def install_native_router_service(port: Optional[int] = None) -> Dict[str, Any]:
         }
         with NATIVE_LAUNCH_AGENT.open("wb") as handle:
             plistlib.dump(payload, handle, sort_keys=False)
-        domain = f"gui/{os.getuid()}"
-        subprocess.run(
-            ["launchctl", "bootout", domain, str(NATIVE_LAUNCH_AGENT)],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
         started = subprocess.run(
             ["launchctl", "bootstrap", domain, str(NATIVE_LAUNCH_AGENT)],
             capture_output=True,
@@ -649,6 +739,10 @@ def install_native_router_service(port: Optional[int] = None) -> Dict[str, Any]:
         time.sleep(0.2)
     if not health.get("reachable"):
         raise RuntimeError("Native router service did not become healthy: " + str(health.get("error") or "unknown"))
+    registry = load_registry()
+    registry["native_router_port"] = selected_port
+    registry["official_proxy"] = proxy
+    save_registry(registry)
     return {
         "installed": True,
         "manager": manager,

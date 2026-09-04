@@ -1,6 +1,7 @@
 import AppKit
 import BridgeCore
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 struct AgentDefinition: Identifiable, Hashable {
@@ -90,10 +91,16 @@ final class AppModel: ObservableObject {
     @Published var refreshingDeviceIDs = Set<String>()
     @Published var testingDeviceIDs = Set<String>()
     @Published var banner: BannerMessage?
+    @Published var launchAtLoginEnabled = false
+    @Published var launchAtLoginStatusText = "正在配置登录启动"
+    @Published var codexReloadRequired = false
 
     private let runner = CommandRunner()
     private var detectionJob: UUID?
     private var consensusMonitor: Task<Void, Never>?
+    private var didStart = false
+    private var didBootstrapClient = false
+    private let fallbackLoginLabel = "cn.haichen.pcl-relay-login"
     let relayNodeName = "haichen-pcl-linux-3070ti"
     let relayMagicDNS = "haichen-pcl-linux-3070ti.tail132f30.ts.net"
     let relayTailscaleIP = "100.113.234.58"
@@ -185,6 +192,103 @@ final class AppModel: ObservableObject {
         if let bundledCLIURL, FileManager.default.isExecutableFile(atPath: bundledCLIURL.path) { return bundledCLIURL }
         if FileManager.default.isExecutableFile(atPath: installedCLIURL.path) { return installedCLIURL }
         return nil
+    }
+
+    func start() {
+        guard !didStart else { return }
+        didStart = true
+        configureLaunchAtLogin()
+        refreshAll()
+        startConsensusMonitoring()
+    }
+
+    private func configureLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        if service.status == .requiresApproval {
+            launchAtLoginEnabled = false
+            launchAtLoginStatusText = "登录启动需要在系统设置中允许"
+            return
+        }
+        do {
+            // Register only a genuinely new login item. If the user disabled
+            // it in System Settings, macOS reports that approval is required;
+            // do not silently override that choice.
+            if service.status == .notRegistered {
+                try service.register()
+            }
+            if service.status == .enabled {
+                launchAtLoginEnabled = true
+                launchAtLoginStatusText = "登录 Mac 后自动显示菜单栏图标"
+            } else {
+                // Locally distributed/ad-hoc-signed builds can remain
+                // notRegistered even when register() returns successfully.
+                // A one-shot user LaunchAgent is a reliable personal-install
+                // fallback. It has no KeepAlive and therefore never relaunches
+                // the app after an explicit Quit.
+                try ensureFallbackLoginAgent()
+                launchAtLoginEnabled = true
+                launchAtLoginStatusText = "登录 Mac 后自动显示菜单栏图标"
+            }
+        } catch {
+            if service.status == .requiresApproval {
+                launchAtLoginEnabled = false
+                launchAtLoginStatusText = "登录启动需要在系统设置中允许"
+                return
+            }
+            do {
+                try ensureFallbackLoginAgent()
+                launchAtLoginEnabled = true
+                launchAtLoginStatusText = "登录 Mac 后自动显示菜单栏图标"
+            } catch {
+                launchAtLoginEnabled = false
+                launchAtLoginStatusText = "登录启动配置失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func ensureFallbackLoginAgent() throws {
+        let manager = FileManager.default
+        let directory = manager.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let plistURL = directory.appendingPathComponent("\(fallbackLoginLabel).plist")
+        let payload: [String: Any] = [
+            "Label": fallbackLoginLabel,
+            "ProgramArguments": ["/usr/bin/open", "-g", Bundle.main.bundleURL.path],
+            "RunAtLoad": true,
+            "KeepAlive": false,
+            "ProcessType": "Interactive",
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: payload, format: .xml, options: 0)
+        try data.write(to: plistURL, options: .atomic)
+        try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: plistURL.path)
+
+        let domain = "gui/\(getuid())"
+        if launchctl(["print", "\(domain)/\(fallbackLoginLabel)"]) != 0 {
+            let status = launchctl(["bootstrap", domain, plistURL.path])
+            guard status == 0 else {
+                throw NSError(
+                    domain: "PCLRelay.LoginItem",
+                    code: Int(status),
+                    userInfo: [NSLocalizedDescriptionKey: "无法注册用户登录项（launchctl \(status)）"]
+                )
+            }
+        }
+    }
+
+    @discardableResult
+    private func launchctl(_ arguments: [String]) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        } catch {
+            return -1
+        }
     }
 
     func refreshAll() {
@@ -746,12 +850,61 @@ final class AppModel: ObservableObject {
     }
 
     private func bootstrapClientIfNeeded() async throws {
+        guard !didBootstrapClient else { return }
         guard let bundledCLIURL,
               FileManager.default.isExecutableFile(atPath: bundledCLIURL.path) else { return }
         let wasInstalled = FileManager.default.isExecutableFile(atPath: installedCLIURL.path)
+        if !localClientNeedsBootstrap() {
+            didBootstrapClient = true
+            return
+        }
         let result = try await runner.run(id: UUID(), executable: bundledCLIURL, arguments: ["install", "client"])
         guard result.exitCode == 0 else { throw commandError(result) }
+        didBootstrapClient = true
+        if let data = result.stdout.data(using: .utf8),
+           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           payload["router_port_changed"] as? Bool == true {
+            codexReloadRequired = true
+            let oldPort = payload["previous_router_port"] as? Int
+            let newPort = ((payload["native_router_service"] as? [String: Any])?["port"] as? Int)
+            show("本地路由端口已从 \(oldPort.map(String.init) ?? "旧端口") 切换到 \(newPort.map(String.init) ?? "新端口")；请退出并重新打开 Codex", .info)
+        }
         if !wasInstalled { show("客户端已自动安装，官方 GPT 配置保持不变", .success) }
+    }
+
+    private func localClientNeedsBootstrap() -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: installedCLIURL.path) else { return true }
+        let installedVersionURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/pcl-codex-bridge/VERSION")
+        let installedVersion = (try? String(contentsOf: installedVersionURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bundledVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        guard installedVersion == bundledVersion else { return true }
+
+        let configURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/config.toml")
+        guard let config = try? String(contentsOf: configURL, encoding: .utf8),
+              config.contains("# >>> pcl-relay native router root >>>"),
+              config.contains("# >>> pcl-codex-bridge managed block >>>"),
+              let configPort = firstCapture(in: config, pattern: #"openai_base_url\s*=\s*\"http://127\.0\.0\.1:(\d+)/v1\""#) else {
+            return true
+        }
+
+        let plistURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/cn.haichen.pcl-relay-router.plist")
+        guard let data = try? Data(contentsOf: plistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let environment = plist["EnvironmentVariables"] as? [String: Any],
+              let servicePort = environment["PCL_RELAY_NATIVE_PORT"] as? String else {
+            return true
+        }
+        return configPort != servicePort
+    }
+
+    private func firstCapture(in text: String, pattern: String) -> String? {
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        return String(text[range])
     }
 
     private func runCLI(_ arguments: [String], id: UUID = UUID()) async throws -> CommandResult {

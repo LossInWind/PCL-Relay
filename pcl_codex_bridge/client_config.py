@@ -318,12 +318,10 @@ def _fallback_native_catalog() -> List[Dict[str, Any]]:
 def native_base_catalog() -> List[Dict[str, Any]]:
     base_path = _native_base_catalog_path()
     existing = _catalog_models(base_path)
-    if existing:
-        return existing
     cache = _catalog_models(codex_home() / "models_cache.json")
     native = [item for item in cache if str(item.get("slug", "")).startswith("gpt-")]
     if not native:
-        native = _fallback_native_catalog()
+        native = existing or _fallback_native_catalog()
     base_path.parent.mkdir(parents=True, exist_ok=True)
     base_path.write_text(json.dumps({"models": native}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return native

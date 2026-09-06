@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -183,6 +184,25 @@ class ClientConfigTests(unittest.TestCase):
         self.assertTrue(official)
         self.assertTrue(all(item["multi_agent_version"] == "v2" for item in pcl))
         self.assertEqual(official[0]["multi_agent_version"], "v2")
+
+    def test_combined_catalog_refreshes_stale_native_base_from_codex_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            (home / "pcl-native-base-models.json").write_text(
+                '{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6 Sol"}]}\n',
+                encoding="utf-8",
+            )
+            (home / "models_cache.json").write_text(
+                '{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6 Sol"},'
+                '{"slug":"gpt-6-astra","display_name":"GPT-6 Astra"}]}\n',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+                models = combined_catalog()["models"]
+            self.assertIn("gpt-6-astra", {item["slug"] for item in models})
+            refreshed = json.loads((home / "pcl-native-base-models.json").read_text(encoding="utf-8"))
+            self.assertIn("gpt-6-astra", {item["slug"] for item in refreshed["models"]})
 
     def test_install_writes_native_custom_roles_without_overwriting_user_role(self):
         with tempfile.TemporaryDirectory() as temp:

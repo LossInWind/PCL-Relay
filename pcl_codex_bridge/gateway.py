@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import ipaddress
+import http.client
 import json
 import os
 import re
 import select
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -53,6 +55,72 @@ TOPOLOGY_REPORTS: Dict[Tuple[int, str], Dict[str, Any]] = {}
 TOPOLOGY_LOCK = threading.Lock()
 PORTAL_URL = "https://llmapi.pcl.ac.cn"
 PORTAL_DOMAIN = "pcl.ac.cn"
+UPSTREAM_OPEN_RETRY_DELAYS = (1.0, 3.0, 6.0, 10.0, 15.0, 20.0, 30.0, 30.0)
+
+
+def _is_transient_upstream_error(exc: BaseException) -> bool:
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return isinstance(
+        reason,
+        (
+            ssl.SSLError,
+            BrokenPipeError,
+            ConnectionResetError,
+            TimeoutError,
+            http.client.RemoteDisconnected,
+        ),
+    ) or (isinstance(reason, OSError) and getattr(reason, "errno", None) in {32, 54, 60, 104, 110})
+
+
+def iter_chat_completion_resilient(chat: Dict[str, Any]):
+    """Retry only before an upstream stream emits its first event.
+
+    Replaying after output begins could duplicate text or tool calls, so those
+    failures remain visible to Codex's turn-resume layer.
+    """
+    for attempt in range(len(UPSTREAM_OPEN_RETRY_DELAYS) + 1):
+        emitted = False
+        try:
+            for event in iter_chat_completion(chat):
+                emitted = True
+                yield event
+            if attempt:
+                log(f"upstream recovered attempt={attempt + 1}")
+            return
+        except Exception as exc:
+            if emitted or attempt >= len(UPSTREAM_OPEN_RETRY_DELAYS) or not _is_transient_upstream_error(exc):
+                raise
+            delay = UPSTREAM_OPEN_RETRY_DELAYS[attempt]
+            log(
+                f"upstream retry attempt={attempt + 1} delay={delay:g}s "
+                f"error={type(exc.reason if isinstance(exc, urllib.error.URLError) else exc).__name__}"
+            )
+            time.sleep(delay)
+
+
+def open_chat_completion_resilient(raw_body: bytes):
+    """Open legacy Chat Completions with the same pre-response policy."""
+    for attempt in range(len(UPSTREAM_OPEN_RETRY_DELAYS) + 1):
+        try:
+            response = urllib.request.urlopen(
+                upstream_request("/chat/completions", raw_body, "POST"), timeout=900
+            )
+            if attempt:
+                log(f"chat upstream recovered attempt={attempt + 1}")
+            return response
+        except urllib.error.HTTPError:
+            raise
+        except Exception as exc:
+            if attempt >= len(UPSTREAM_OPEN_RETRY_DELAYS) or not _is_transient_upstream_error(exc):
+                raise
+            delay = UPSTREAM_OPEN_RETRY_DELAYS[attempt]
+            log(
+                f"chat upstream retry attempt={attempt + 1} delay={delay:g}s "
+                f"error={type(exc.reason if isinstance(exc, urllib.error.URLError) else exc).__name__}"
+            )
+            time.sleep(delay)
+
+
 def log(message: str) -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"sk-[A-Za-z0-9_-]+", "[REDACTED]", message)
@@ -416,7 +484,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def _proxy_chat(self) -> None:
         raw_body = self._body()
         try:
-            with urllib.request.urlopen(upstream_request("/chat/completions", raw_body, "POST"), timeout=900) as response:
+            with open_chat_completion_resilient(raw_body) as response:
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.headers.get("Content-Type", "application/json"))
                 self.send_header("Cache-Control", "no-cache")
@@ -471,7 +539,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         bridge = ResponsesStreamBridge(sse, body, chat)
         try:
-            for event in iter_chat_completion(chat):
+            for event in iter_chat_completion_resilient(chat):
                 bridge.process(event)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")

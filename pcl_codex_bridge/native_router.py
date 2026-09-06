@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -15,8 +16,9 @@ import zlib
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from . import __version__
 from .models import DEFAULT_GATEWAY_URL, load_registry
@@ -33,6 +35,16 @@ OPENAI_CODEX_BASE_URL = os.environ.get(
     "https://chatgpt.com/backend-api/codex",
 ).rstrip("/")
 MAX_REQUEST_BYTES = 96 * 1024 * 1024
+# Keep the caller's current turn alive long enough for Haichen Services to
+# validate and replace a bad Clash node after the first transport failure.
+OFFICIAL_OPEN_RETRY_DELAYS = (
+    1.0,
+    3.0,
+    6.0,
+    10.0,
+    15.0,
+    20.0,
+) + (30.0,) * 18
 
 # Forward only the caller identity and Codex request metadata needed by the
 # official backend. This list follows the MIT-licensed OpenCodex forward-mode
@@ -247,12 +259,34 @@ def route_request(payload: Dict[str, Any]) -> Tuple[str, str]:
     return "openai", model
 
 
-def rewrite_pcl_body(payload: Dict[str, Any], upstream_model: str) -> bytes:
+def rewrite_pcl_body(
+    payload: Dict[str, Any], upstream_model: str, request_path: str = ""
+) -> bytes:
     rewritten = dict(payload)
     rewritten["model"] = upstream_model
     # These fields are meaningful only to ChatGPT's native service and can make
     # strict OpenAI-compatible gateways reject an otherwise valid child turn.
     rewritten.pop("service_tier", None)
+    path = request_path.split("?", 1)[0]
+    disable_thinking = (
+        rewritten.get("reasoning_effort") == "none"
+        or rewritten.get("enableThinking") is False
+        or rewritten.get("enable_thinking") is False
+    )
+    if path == "/v1/chat/completions" and upstream_model.lower().startswith("glm") and disable_thinking:
+        # Karpathywiki emits the OpenAI-compatible reasoning_effort field, while
+        # PCL's vLLM-hosted GLM models use chat-template kwargs for this control.
+        # Translate at the trust boundary so callers need no model-specific API.
+        template_kwargs = rewritten.get("chat_template_kwargs")
+        if not isinstance(template_kwargs, dict):
+            template_kwargs = {}
+        else:
+            template_kwargs = dict(template_kwargs)
+        template_kwargs["enable_thinking"] = False
+        rewritten["chat_template_kwargs"] = template_kwargs
+        rewritten.pop("reasoning_effort", None)
+        rewritten.pop("enableThinking", None)
+        rewritten.pop("enable_thinking", None)
     return json.dumps(rewritten, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -330,6 +364,71 @@ def opener_for(route: str) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener()
 
 
+def _is_transient_open_error(exc: BaseException) -> bool:
+    """Return true only for transport failures before an HTTP response exists."""
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return isinstance(
+        reason,
+        (ssl.SSLError, BrokenPipeError, ConnectionResetError, TimeoutError),
+    ) or (isinstance(reason, OSError) and getattr(reason, "errno", None) in {32, 54, 60, 104})
+
+
+def _transport_error_label(exc: BaseException) -> str:
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    errno_value = getattr(reason, "errno", None)
+    return f"{type(reason).__name__}(errno={errno_value})" if errno_value is not None else type(reason).__name__
+
+
+def _log_official_transport(
+    event: str,
+    *,
+    attempt: int,
+    error: Optional[BaseException] = None,
+    request_id: str = "",
+) -> None:
+    fields = [
+        time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        f"official_transport event={event}",
+        f"attempt={attempt}",
+    ]
+    if request_id:
+        fields.append(f"request_id={request_id}")
+    if error is not None:
+        fields.append(f"error={_transport_error_label(error)}")
+    sys.stderr.write(" ".join(fields) + "\n")
+    sys.stderr.flush()
+
+
+def open_upstream_response(
+    route: str,
+    target: str,
+    body: bytes,
+    headers: Dict[str, str],
+    timeout: int = 1800,
+    request_id: str = "",
+) -> Any:
+    """Open an upstream response, retrying only transient official transport setup failures."""
+    delays = OFFICIAL_OPEN_RETRY_DELAYS if route == "openai" else ()
+    for attempt in range(len(delays) + 1):
+        request = urllib.request.Request(target, data=body, method="POST", headers=headers)
+        try:
+            response = opener_for(route).open(request, timeout=timeout)
+            if route == "openai" and attempt:
+                _log_official_transport("recovered", attempt=attempt + 1, request_id=request_id)
+            return response
+        except urllib.error.HTTPError:
+            raise
+        except Exception as exc:
+            if attempt >= len(delays) or not _is_transient_open_error(exc):
+                if route == "openai" and _is_transient_open_error(exc):
+                    _log_official_transport(
+                        "exhausted", attempt=attempt + 1, error=exc, request_id=request_id
+                    )
+                raise
+            _log_official_transport("retry", attempt=attempt + 1, error=exc, request_id=request_id)
+            time.sleep(delays[attempt])
+
+
 def upstream_url(route: str, request_path: str) -> str:
     path, separator, query = request_path.partition("?")
     if not path.startswith("/v1/"):
@@ -405,7 +504,7 @@ def _public_response_headers(headers: Any) -> Dict[str, str]:
     return result
 
 
-def relay_upstream_body(response: Any, target: Any) -> None:
+def relay_upstream_body(response: Any, target: Any, request_id: str = "") -> None:
     """Copy an upstream response without buffering SSE events.
 
     ``HTTPResponse.read(size)`` is allowed to wait until ``size`` bytes have
@@ -418,12 +517,18 @@ def relay_upstream_body(response: Any, target: Any) -> None:
 
     content_type = str(response.headers.get("Content-Type", "")).lower()
     if "text/event-stream" in content_type:
-        while True:
-            chunk = response.readline()
-            if not chunk:
-                break
-            target.write(chunk)
-            target.flush()
+        try:
+            while True:
+                chunk = response.readline()
+                if not chunk:
+                    break
+                target.write(chunk)
+                target.flush()
+        except Exception as exc:
+            _log_official_transport(
+                "stream_interrupted", attempt=1, error=exc, request_id=request_id
+            )
+            raise
         return
 
     reader = getattr(response, "read1", None) or response.read
@@ -532,21 +637,39 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             payload, decoded = decode_request_body(raw, self.headers.get("Content-Encoding", ""))
             route, model = route_for_path(payload, self.path)
-            body = rewrite_pcl_body(payload, model) if route == "pcl" else rewrite_official_body(payload, decoded)
-            target = upstream_url(route, self.path)
-            request = urllib.request.Request(
-                target,
-                data=body,
-                method="POST",
-                headers=outbound_headers(route, self.headers.items(), len(body)),
+            body = (
+                rewrite_pcl_body(payload, model, self.path)
+                if route == "pcl"
+                else rewrite_official_body(payload, decoded)
             )
-            with opener_for(route).open(request, timeout=1800) as response:
+            if route == "pcl" and self.path.split("?", 1)[0] == "/v1/chat/completions":
+                rewritten_payload = json.loads(body.decode("utf-8"))
+                template_kwargs = rewritten_payload.get("chat_template_kwargs")
+                thinking_disabled = (
+                    isinstance(template_kwargs, dict)
+                    and template_kwargs.get("enable_thinking") is False
+                )
+                self.log_message(
+                    "PCL chat request model=%s bytes=%d max_tokens=%s thinking_disabled=%s",
+                    model,
+                    len(body),
+                    rewritten_payload.get("max_tokens"),
+                    thinking_disabled,
+                )
+            target = upstream_url(route, self.path)
+            headers = outbound_headers(route, self.headers.items(), len(body))
+            raw_request_id = self.headers.get("x-client-request-id", "")
+            request_id = "".join(character for character in raw_request_id if character.isalnum() or character in "-_")[:64]
+            request_id = request_id or uuid.uuid4().hex[:16]
+            with open_upstream_response(
+                route, target, body, headers, timeout=1800, request_id=request_id
+            ) as response:
                 self.send_response(response.status)
                 for name, value in _public_response_headers(response.headers).items():
                     self.send_header(name, value)
                 self.send_header("Connection", "close")
                 self.end_headers()
-                relay_upstream_body(response, self.wfile)
+                relay_upstream_body(response, self.wfile, request_id=request_id)
             self.close_connection = True
         except urllib.error.HTTPError as exc:
             body = exc.read()

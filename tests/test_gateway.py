@@ -1,9 +1,12 @@
 import json
 import http.client
+import ssl
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -16,6 +19,8 @@ from pcl_codex_bridge.gateway import (
     recent_logs,
     record_topology_heartbeat,
     topology_snapshot,
+    iter_chat_completion_resilient,
+    open_chat_completion_resilient,
 )
 from pcl_codex_bridge.responses_protocol import (
     COMPACT_PROMPT,
@@ -35,6 +40,57 @@ from pcl_codex_bridge.responses_protocol import (
 
 
 class GatewayMappingTests(unittest.TestCase):
+    def test_responses_retries_transient_tls_failure_before_first_event(self):
+        completed = [
+            {"kind": "content", "delta": "done"},
+            {"kind": "finish", "reason": "stop"},
+        ]
+        with (
+            mock.patch(
+                "pcl_codex_bridge.gateway.iter_chat_completion",
+                side_effect=[urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof")), iter(completed)],
+            ) as upstream,
+            mock.patch("pcl_codex_bridge.gateway.time.sleep") as sleep,
+            mock.patch("pcl_codex_bridge.gateway.log"),
+        ):
+            events = list(iter_chat_completion_resilient({"model": "DeepSeek-V4-Pro"}))
+        self.assertEqual(events, completed)
+        self.assertEqual(upstream.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_responses_never_replays_after_streaming_started(self):
+        def partial(_chat):
+            yield {"kind": "content", "delta": "partial"}
+            raise urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof"))
+
+        with (
+            mock.patch("pcl_codex_bridge.gateway.iter_chat_completion", side_effect=partial) as upstream,
+            mock.patch("pcl_codex_bridge.gateway.time.sleep") as sleep,
+            self.assertRaises(urllib.error.URLError),
+        ):
+            list(iter_chat_completion_resilient({"model": "DeepSeek-V4-Pro"}))
+        self.assertEqual(upstream.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_chat_retries_remote_disconnect_before_response(self):
+        response = mock.MagicMock()
+        with (
+            mock.patch(
+                "pcl_codex_bridge.gateway.upstream_request",
+                return_value=urllib.request.Request("https://example.test/v1/chat/completions"),
+            ),
+            mock.patch(
+                "pcl_codex_bridge.gateway.urllib.request.urlopen",
+                side_effect=[http.client.RemoteDisconnected("closed"), response],
+            ) as upstream,
+            mock.patch("pcl_codex_bridge.gateway.time.sleep") as sleep,
+            mock.patch("pcl_codex_bridge.gateway.log"),
+        ):
+            actual = open_chat_completion_resilient(b"{}")
+        self.assertIs(actual, response)
+        self.assertEqual(upstream.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
     def test_responses_string_input_is_one_user_message(self):
         messages = responses_messages(
             {"instructions": "Be concise.", "input": "请回答：7乘以8是多少？"}

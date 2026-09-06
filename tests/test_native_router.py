@@ -1,8 +1,10 @@
 import json
 import base64
 import http.client
+import ssl
 import threading
 import unittest
+import urllib.error
 from io import BytesIO
 from http.server import ThreadingHTTPServer
 from unittest import mock
@@ -11,6 +13,66 @@ from pcl_codex_bridge import native_router
 
 
 class NativeRouterTests(unittest.TestCase):
+    def test_official_open_retries_transient_ssl_eof_before_response(self):
+        response = mock.MagicMock()
+        opener = mock.MagicMock()
+        opener.open.side_effect = [
+            urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof")),
+            response,
+        ]
+        with (
+            mock.patch.object(native_router, "opener_for", return_value=opener),
+            mock.patch.object(native_router.time, "sleep") as sleep,
+            mock.patch.object(native_router, "_log_official_transport") as log_transport,
+        ):
+            actual = native_router.open_upstream_response(
+                "openai", "https://chatgpt.com/backend-api/codex/responses", b"{}", {}
+            )
+        self.assertIs(actual, response)
+        self.assertEqual(opener.open.call_count, 2)
+        sleep.assert_called_once_with(native_router.OFFICIAL_OPEN_RETRY_DELAYS[0])
+        self.assertEqual(log_transport.call_count, 2)
+
+    def test_official_open_keeps_turn_alive_across_node_switch_window(self):
+        response = mock.MagicMock()
+        opener = mock.MagicMock()
+        failure = urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof"))
+        opener.open.side_effect = [failure] * len(native_router.OFFICIAL_OPEN_RETRY_DELAYS) + [response]
+        with (
+            mock.patch.object(native_router, "opener_for", return_value=opener),
+            mock.patch.object(native_router.time, "sleep") as sleep,
+        ):
+            actual = native_router.open_upstream_response(
+                "openai", "https://chatgpt.com/backend-api/codex/responses", b"{}", {}
+            )
+        self.assertIs(actual, response)
+        self.assertEqual(opener.open.call_count, len(native_router.OFFICIAL_OPEN_RETRY_DELAYS) + 1)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            list(native_router.OFFICIAL_OPEN_RETRY_DELAYS),
+        )
+
+    def test_official_open_does_not_retry_http_errors(self):
+        error = urllib.error.HTTPError("https://example.test", 429, "limited", {}, None)
+        opener = mock.MagicMock()
+        opener.open.side_effect = error
+        with (
+            mock.patch.object(native_router, "opener_for", return_value=opener),
+            self.assertRaises(urllib.error.HTTPError),
+        ):
+            native_router.open_upstream_response("openai", "https://example.test", b"{}", {})
+        self.assertEqual(opener.open.call_count, 1)
+
+    def test_pcl_open_does_not_retry_transport_errors(self):
+        opener = mock.MagicMock()
+        opener.open.side_effect = urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof"))
+        with (
+            mock.patch.object(native_router, "opener_for", return_value=opener),
+            self.assertRaises(urllib.error.URLError),
+        ):
+            native_router.open_upstream_response("pcl", "https://llmapi.test/responses", b"{}", {})
+        self.assertEqual(opener.open.call_count, 1)
+
     def test_sse_relay_flushes_each_line_without_sized_read_buffering(self):
         class FakeResponse:
             headers = {"Content-Type": "text/event-stream; charset=utf-8"}
@@ -46,6 +108,21 @@ class NativeRouterTests(unittest.TestCase):
             b"event: response.reasoning_summary_text.delta\n",
         )
         self.assertIn(b'"delta":"think"', output.getvalue())
+
+    def test_sse_interruption_is_logged_with_request_id(self):
+        class BrokenResponse:
+            headers = {"Content-Type": "text/event-stream"}
+
+            def readline(self):
+                raise ssl.SSLEOFError(8, "unexpected eof")
+
+        with (
+            mock.patch.object(native_router, "_log_official_transport") as log_transport,
+            self.assertRaises(ssl.SSLEOFError),
+        ):
+            native_router.relay_upstream_body(BrokenResponse(), BytesIO(), request_id="req-123")
+        log_transport.assert_called_once()
+        self.assertEqual(log_transport.call_args.kwargs["request_id"], "req-123")
 
     def test_topology_heartbeat_reports_endpoint_measurements(self):
         managed = "# >>> pcl-codex-bridge managed block >>>\n# >>> pcl-relay native router root >>>\n[features.multi_agent_v2]\n"
@@ -112,6 +189,31 @@ class NativeRouterTests(unittest.TestCase):
         self.assertEqual(payload["model"], "DeepSeek-V4-Pro")
         self.assertEqual(payload["input"], "hello")
         self.assertNotIn("service_tier", payload)
+
+    def test_pcl_rewrite_maps_glm_chat_thinking_control(self):
+        body = native_router.rewrite_pcl_body(
+            {
+                "model": "pcl/GLM-5.2",
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": "none",
+                "chat_template_kwargs": {"custom": "kept"},
+            },
+            "GLM-5.2",
+            "/v1/chat/completions",
+        )
+        payload = json.loads(body)
+        self.assertEqual(payload["chat_template_kwargs"], {"custom": "kept", "enable_thinking": False})
+        self.assertNotIn("reasoning_effort", payload)
+
+    def test_pcl_rewrite_leaves_non_glm_reasoning_control_unchanged(self):
+        body = native_router.rewrite_pcl_body(
+            {"model": "pcl/DeepSeek-V4-Pro", "reasoning_effort": "none"},
+            "DeepSeek-V4-Pro",
+            "/v1/chat/completions",
+        )
+        payload = json.loads(body)
+        self.assertEqual(payload["reasoning_effort"], "none")
+        self.assertNotIn("chat_template_kwargs", payload)
 
     def test_agents_v2_messages_are_plaintext_without_touching_reserved_or_private_fields(self):
         payload = {

@@ -67,7 +67,7 @@ class RelayDiscoveryTests(unittest.TestCase):
             updated = config.read_text(encoding="utf-8")
             updated_registry = json.loads(registry_file.read_text(encoding="utf-8"))
         self.assertIn('model = "gpt-5.6-sol"', updated)
-        self.assertIn('model_provider = "openai"', updated)
+        self.assertIn('model_provider = "pcl_relay_official"', updated)
         self.assertIn('openai_base_url = "http://127.0.0.1:15724/v1"', updated)
         self.assertIn('PCL_CODEX_GATEWAY_URL = "http://new.tail.test:15722/v1"', updated)
         self.assertNotIn('[model_providers.pcl_internal]', updated)

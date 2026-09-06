@@ -113,6 +113,7 @@ def managed_block(
     include_agents_table: bool = True,
     include_v2_table: bool = True,
     registry: Optional[Dict[str, Any]] = None,
+    router_port: int = NATIVE_ROUTER_DEFAULT_PORT,
 ) -> str:
     """Return the non-root TOML owned by PCL Relay.
 
@@ -157,6 +158,16 @@ def managed_block(
             "hide_spawn_agent_metadata = true",
             'tool_namespace = "agents"',
         ]
+    insert_at = lines.index(END)
+    lines[insert_at:insert_at] = [
+        "",
+        "[model_providers.pcl_relay_official]",
+        'name = "OpenAI via PCL Relay"',
+        f"base_url = {json.dumps(f'http://127.0.0.1:{router_port}/v1')}",
+        'wire_api = "responses"',
+        "requires_openai_auth = true",
+        "supports_websockets = false",
+    ]
     return "\n".join(lines)
 
 
@@ -175,6 +186,7 @@ def native_root_block(port: int, catalog: Path) -> str:
         [
             ROOT_BEGIN,
             f"openai_base_url = {json.dumps(f'http://127.0.0.1:{port}/v1')}",
+            'model_provider = "pcl_relay_official"',
             f"model_catalog_json = {json.dumps(str(catalog))}",
             ROOT_END,
         ]
@@ -184,7 +196,7 @@ def native_root_block(port: int, catalog: Path) -> str:
 def _root_key_conflicts(text: str) -> List[str]:
     root = text.split("\n[", 1)[0]
     conflicts = []
-    for key in ("openai_base_url", "model_catalog_json"):
+    for key in ("openai_base_url", "model_provider", "model_catalog_json"):
         if re.search(rf"(?m)^\s*{re.escape(key)}\s*=", root):
             conflicts.append(key)
     return conflicts
@@ -439,6 +451,12 @@ def install_client_config(
     original = config.read_text(encoding="utf-8") if config.exists() else ""
     previous_port = _router_port_from_config_text(original)
     base = strip_native_root_block(strip_managed_block(original))
+    # The built-in OpenAI provider always advertises WebSocket support.  The
+    # managed loopback provider keeps the same OpenAI authentication while
+    # declaring the router's actual HTTP/SSE-only transport capability.
+    root, separator, tables = base.partition("\n[")
+    root = re.sub(r'(?m)^\s*model_provider\s*=\s*"openai"\s*\n?', "", root)
+    base = root + (separator + tables if separator else "")
     conflicts = _root_key_conflicts(base)
     if conflicts:
         raise RuntimeError(
@@ -462,6 +480,7 @@ def install_client_config(
         include_agents_table=not has_agents_table,
         include_v2_table=not has_v2_table,
         registry=registry,
+        router_port=port,
     )
     updated = native_root_block(port, catalog) + "\n\n" + base.strip() + "\n\n" + block + "\n"
     backup_path = backup(config) if updated != original else None

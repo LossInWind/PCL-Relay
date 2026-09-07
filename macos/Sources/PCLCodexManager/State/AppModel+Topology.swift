@@ -128,7 +128,7 @@ extension AppModel {
             do {
                 let result = try await performRemoteUpdate(node, target: target)
                 commandLog = BridgeDecode.prettyJSON(result.stdout)
-                show("\(node.nodeName) 已升级客户端、模型目录和原生角色；请重新加载该服务器的 VS Code 窗口", .success)
+                show("\(node.nodeName) 已通过\(updateSourceLabel(result.stdout))升级；请重新加载该服务器的 VS Code 窗口", .success)
                 await discoverNodes(showBanner: false)
             } catch {
                 show("远端升级失败：\(error.localizedDescription)", .error)
@@ -156,7 +156,7 @@ extension AppModel {
                 do {
                     let result = try await performRemoteUpdate(node, target: target)
                     commandLog = BridgeDecode.prettyJSON(result.stdout)
-                    succeeded.append(node.nodeName)
+                    succeeded.append("\(node.nodeName)（\(updateSourceLabel(result.stdout))）")
                 } catch {
                     failed.append("\(node.nodeName)：\(error.localizedDescription)")
                 }
@@ -185,6 +185,17 @@ extension AppModel {
         }
         guard result.exitCode == 0 else { throw commandError(result) }
         return result
+    }
+
+    private func updateSourceLabel(_ stdout: String) -> String {
+        guard let data = stdout.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "已验证来源"
+        }
+        let nestedClient = payload["client"] as? [String: Any]
+        let source = (payload["update_source"] as? String)
+            ?? (nestedClient?["update_source"] as? String)
+        return source == "github_release" ? "GitHub Release" : "当前 Mac 回退包"
     }
 
     func configureNode(_ node: RelayCandidate, route: String? = nil) {

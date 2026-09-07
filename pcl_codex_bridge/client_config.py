@@ -38,6 +38,9 @@ ROOT_END = "# <<< pcl-relay native router root <<<"
 INSTALL_ROOT = Path.home() / ".local" / "share" / "pcl-codex-bridge"
 BIN_PATH = Path.home() / ".local" / "bin" / "pcl-codex"
 UNSANDBOXED_MARKER = Path.home() / ".config" / "pcl-codex-bridge" / "allow-unsandboxed-fallback"
+INTEGRATION_DISABLED_MARKER = (
+    Path.home() / ".config" / "pcl-codex-bridge" / "integration-disabled"
+)
 NATIVE_CATALOG_NAME = "pcl-native-models.json"
 NATIVE_BASE_CATALOG_NAME = "pcl-native-base-models.json"
 NATIVE_STATE_ROOT = Path.home() / ".local" / "state" / "pcl-codex-bridge"

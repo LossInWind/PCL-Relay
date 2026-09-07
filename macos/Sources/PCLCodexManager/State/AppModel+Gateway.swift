@@ -2,6 +2,29 @@ import BridgeCore
 import Foundation
 
 extension AppModel {
+    func setIntegrationEnabled(_ enabled: Bool) {
+        guard !isTogglingIntegration, enabled != integrationEnabled else { return }
+        isTogglingIntegration = true
+        Task {
+            defer { isTogglingIntegration = false }
+            do {
+                let result = try await runCLI(["integration", enabled ? "enable" : "disable"])
+                guard result.exitCode == 0 else { throw commandError(result) }
+                integrationEnabled = enabled
+                codexReloadRequired = true
+                show(
+                    enabled
+                        ? "PCL 子 Agent 已启用；重新打开 Codex 后生效"
+                        : "PCL 子 Agent 已关闭，Codex 已恢复官方设置；重新打开 Codex 后生效",
+                    .success
+                )
+                refreshAll()
+            } catch {
+                show("切换 Codex 集成失败：\(error.localizedDescription)", .error)
+            }
+        }
+    }
+
     func restartGateway() {
         guard !isRestartingGateway else { return }
         isRestartingGateway = true

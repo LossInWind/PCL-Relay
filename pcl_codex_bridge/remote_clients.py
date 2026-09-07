@@ -20,6 +20,7 @@ from . import __version__
 from .http_client import request_json
 from .relay_discovery import discover_relays
 from .models import DEFAULT_GATEWAY_URL, load_registry
+from .release_updater import CLIENT_ASSET_NAME, REPOSITORY
 
 
 SSH_OPTIONS = [
@@ -838,6 +839,84 @@ with tempfile.TemporaryDirectory(prefix="pcl-codex-install-") as temp:
 '''
 
 
+REMOTE_GITHUB_INSTALL_SOURCE = r'''
+import hashlib, io, json, os, pathlib, platform, subprocess, sys, tarfile, tempfile, urllib.request
+
+gateway = os.environ["PCL_REMOTE_GATEWAY"]
+expected_version = os.environ["PCL_REMOTE_EXPECTED_VERSION"]
+archive_url = os.environ["PCL_REMOTE_RELEASE_ARCHIVE"]
+checksum_url = os.environ["PCL_REMOTE_RELEASE_CHECKSUM"]
+if platform.system() not in {"Darwin", "Linux"}:
+    raise SystemExit("Only macOS and Linux remote clients are supported")
+if sys.version_info < (3, 9):
+    raise SystemExit("Python 3.9 or newer is required for remote installation")
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+request_headers = {"User-Agent": "PCL-Relay-Remote-Updater/" + expected_version}
+
+def download(url, limit):
+    request = urllib.request.Request(url, headers=request_headers)
+    with opener.open(request, timeout=45) as response:
+        payload = response.read(limit + 1)
+    if len(payload) > limit:
+        raise RuntimeError("GitHub Release client asset exceeds the safety limit")
+    return payload
+
+try:
+    checksum_text = download(checksum_url, 4096).decode("utf-8", "replace").strip()
+    expected_digest = checksum_text.split()[0].lower() if checksum_text else ""
+    if len(expected_digest) != 64 or any(character not in "0123456789abcdef" for character in expected_digest):
+        raise RuntimeError("GitHub Release client checksum is invalid")
+    payload = download(archive_url, 64 * 1024 * 1024)
+    actual_digest = hashlib.sha256(payload).hexdigest()
+    if actual_digest != expected_digest:
+        raise RuntimeError("GitHub Release client checksum verification failed")
+
+    with tempfile.TemporaryDirectory(prefix="pcl-codex-github-install-") as temp:
+        root = pathlib.Path(temp).resolve()
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            for member in archive.getmembers():
+                destination = (root / member.name).resolve()
+                if os.path.commonpath((str(root), str(destination))) != str(root):
+                    raise RuntimeError("GitHub Release client archive contains an unsafe path")
+                if member.issym() or member.islnk():
+                    raise RuntimeError("GitHub Release client archive contains an unsupported link")
+            archive.extractall(root)
+        packaged_version = (root / "pcl_codex_bridge" / "VERSION").read_text(encoding="utf-8").strip()
+        if packaged_version != expected_version:
+            raise RuntimeError(
+                "GitHub Release client version mismatch: expected "
+                + expected_version
+                + ", got "
+                + packaged_version
+            )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(root)
+        command = [sys.executable, "-m", "pcl_codex_bridge.cli", "--gateway-url", gateway, "install", "client"]
+        result = subprocess.run(command, capture_output=True, text=True, env=env)
+except Exception as exc:
+    raise SystemExit(f"PCL_GITHUB_UNAVAILABLE: {type(exc).__name__}: {exc}")
+
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+raise SystemExit(result.returncode)
+'''
+
+
+def _github_client_install_source(gateway_url: str) -> str:
+    release_base = f"https://github.com/{REPOSITORY}/releases/download/v{__version__}"
+    values = {
+        "PCL_REMOTE_GATEWAY": gateway_url,
+        "PCL_REMOTE_EXPECTED_VERSION": __version__,
+        "PCL_REMOTE_RELEASE_ARCHIVE": f"{release_base}/{CLIENT_ASSET_NAME}",
+        "PCL_REMOTE_RELEASE_CHECKSUM": f"{release_base}/{CLIENT_ASSET_NAME}.sha256",
+    }
+    return "".join(
+        "import os\nos.environ[" + repr(name) + "] = " + repr(value) + "\n"
+        for name, value in values.items()
+    ) + REMOTE_GITHUB_INSTALL_SOURCE
+
+
 def install_remote_client(target: str, gateway_url: str) -> Dict[str, Any]:
     requested_host = urllib.parse.urlparse(gateway_url).hostname
     if requested_host not in {"127.0.0.1", "localhost", "::1"}:
@@ -845,14 +924,39 @@ def install_remote_client(target: str, gateway_url: str) -> Dict[str, Any]:
     parsed = urllib.parse.urlparse(gateway_url)
     if parsed.scheme != "http" or not parsed.hostname or not gateway_url.rstrip("/").endswith("/v1"):
         raise RuntimeError("Invalid selected gateway URL")
-    source = "import os\nos.environ['PCL_REMOTE_GATEWAY'] = " + repr(gateway_url) + "\n" + REMOTE_INSTALL_SOURCE
+    update_source = "github_release"
+    github_error = ""
     try:
-        result = _run_remote_python(target, source, stdin=_source_archive(), timeout=180)
+        result = _run_remote_python(
+            target,
+            _github_client_install_source(gateway_url),
+            timeout=180,
+        )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"Remote client installation timed out: {exc}") from exc
+        result = subprocess.CompletedProcess([], 124, b"", str(exc).encode("utf-8"))
     if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", "replace").strip()
-        raise RuntimeError(detail or "Remote client installation failed")
+        github_error = result.stderr.decode("utf-8", "replace").strip() or "GitHub Release unavailable"
+        if "PCL_GITHUB_UNAVAILABLE:" not in github_error and result.returncode != 124:
+            raise RuntimeError(github_error or "Remote client installation failed")
+        update_source = "current_mac_fallback"
+        source = (
+            "import os\nos.environ['PCL_REMOTE_GATEWAY'] = "
+            + repr(gateway_url)
+            + "\n"
+            + REMOTE_INSTALL_SOURCE
+        )
+        try:
+            result = _run_remote_python(
+                target,
+                source,
+                stdin=_source_archive(),
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Remote client installation timed out: {exc}") from exc
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(detail or "Remote client installation failed")
     status = remote_client_status(target, gateway_url)
     if not status.get("ready"):
         raise RuntimeError(f"Remote install completed but verification failed: {status.get('error') or status}")
@@ -860,6 +964,8 @@ def install_remote_client(target: str, gateway_url: str) -> Dict[str, Any]:
         "ssh_target": target,
         "gateway": gateway_url,
         "client_version": __version__,
+        "update_source": update_source,
+        "github_error": github_error if update_source == "current_mac_fallback" else "",
         "status": status,
         "vscode_reload_required": True,
         "scope": ["~/.codex", "~/.local/share/pcl-codex-bridge", "~/.local/bin/pcl-codex", "user native-router service"],

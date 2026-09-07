@@ -1,4 +1,5 @@
 import ast
+import plistlib
 import unittest
 from pathlib import Path
 
@@ -16,6 +17,20 @@ def internal_imports(module: str) -> set[str]:
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_version_has_one_canonical_source(self):
+        root = PACKAGE.parent
+        expected = (PACKAGE / "VERSION").read_text(encoding="utf-8").strip()
+        from pcl_codex_bridge import __version__
+
+        self.assertEqual(__version__, expected)
+        self.assertIn('dynamic = ["version"]', (root / "pyproject.toml").read_text())
+        with (root / "macos" / "Info.plist").open("rb") as handle:
+            source_plist = plistlib.load(handle)
+        self.assertEqual(source_plist["CFBundleShortVersionString"], "0.0.0")
+        build_script = (root / "scripts" / "build_macos_app.sh").read_text()
+        self.assertIn("pcl_codex_bridge/VERSION", build_script)
+        self.assertIn("Set :CFBundleShortVersionString $VERSION", build_script)
+
     def test_low_level_data_plane_does_not_depend_on_control_plane(self):
         control_plane = {
             "bridges",

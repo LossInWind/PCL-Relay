@@ -43,6 +43,17 @@ struct HeaderBar: View {
 
             Spacer()
 
+            Toggle(
+                "PCL Agent",
+                isOn: Binding(
+                    get: { model.integrationEnabled },
+                    set: { model.setIntegrationEnabled($0) }
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(model.isTogglingIntegration)
+
             StatusPill(
                 title: model.relayReady ? "中转站在线" : "需要检查",
                 active: model.relayReady,

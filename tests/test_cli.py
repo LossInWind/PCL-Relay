@@ -4,10 +4,39 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pcl_codex_bridge.cli import portal_status, select_models
+from pcl_codex_bridge.cli import (
+    integration_status,
+    portal_status,
+    select_models,
+    uninstall_client,
+)
 
 
 class CliTests(unittest.TestCase):
+    def test_integration_disable_is_persistent_and_restores_official_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_home = root / ".codex"
+            codex_home.mkdir()
+            config = codex_home / "config.toml"
+            config.write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
+            marker = root / "integration-disabled"
+            with (
+                mock.patch("pcl_codex_bridge.cli.INTEGRATION_DISABLED_MARKER", marker),
+                mock.patch("pcl_codex_bridge.cli.uninstall_native_router_service", return_value={"stopped": []}),
+                mock.patch("pcl_codex_bridge.cli.uninstall_client_config", return_value={"config_changed": True}),
+                mock.patch("pcl_codex_bridge.cli.native_router_health", return_value={"reachable": False}),
+                mock.patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}),
+            ):
+                disabled = uninstall_client()
+                status = integration_status()
+                marker_mode = marker.stat().st_mode & 0o777
+        self.assertFalse(disabled["enabled"])
+        self.assertTrue(disabled["official_codex_restored"])
+        self.assertEqual(marker_mode, 0o600)
+        self.assertFalse(status["enabled"])
+        self.assertTrue(status["official_codex_restored"])
+
     def test_portal_status_uses_selected_gateway_as_https_proxy(self):
         completed = mock.MagicMock(returncode=0, stdout="200\ntext/html; charset=utf-8\n0.082", stderr="")
         with mock.patch("pcl_codex_bridge.cli.subprocess.run", return_value=completed) as run:

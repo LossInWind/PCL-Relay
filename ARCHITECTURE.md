@@ -23,6 +23,7 @@ native_router.py            本机回环路由，决定官方 GPT 或 pcl/<model
 - `gateway.py` 只处理 Tailnet HTTP 边界、门户代理、拓扑心跳和请求编排。
 - `responses_protocol.py` 负责 Responses 与 Chat Completions 的语义转换。
 - `responses_stream.py` 只负责流式事件状态机，不管理网络或配置。
+- 工具调用跨越 Chat Completions/Responses 边界前必须完整缓冲并按声明校验；任何路径都不得把未验证参数写入 Codex 会话历史。
 - PCL API Key 只由中转站的数据面读取，不能进入客户端配置、拓扑或日志。
 
 ## 控制面
@@ -76,6 +77,8 @@ PCLCodexManagerApp
 4. 改 Codex 文件或用户服务：集中在 `client_config.py`，写入必须可重复、可回滚、原子化。
 5. 新增 UI 操作：View → 对应 AppModel 扩展 → CLI；不绕过任何一层。
 6. 同一事实只保留一个来源。注册表、实时健康检查和完整心跳轮次的优先级必须明确，不能由多个页面各算一遍。
+7. 发布版本只读取 `pcl_codex_bridge/VERSION`；源码 plist 和其他配置不得保存第二份手工版本号。远端更新先尝试校验过的 GitHub Release，失败后才接收当前 Mac 的同版本归档。
+8. Codex 集成总开关只管理 PCL Relay 自己的路由、配置和角色；关闭状态必须持久化，且不得修改官方登录凭据或用户自有配置。
 
 ## 验收门槛
 

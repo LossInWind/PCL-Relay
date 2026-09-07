@@ -1,9 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "pcl-codex-bridge"
-version = "2.5.1"
+dynamic = ["version"]
 description = "Unified Tailnet PCL relay and Codex native sub-agent manager"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = "MIT"
+
+[tool.setuptools]
+packages = ["pcl_codex_bridge"]
+
+[tool.setuptools.dynamic]
+version = {file = ["pcl_codex_bridge/VERSION"]}
+
+[tool.setuptools.package-data]
+pcl_codex_bridge = ["VERSION"]
 
 [project.scripts]
 pcl-codex = "pcl_codex_bridge.cli:main"

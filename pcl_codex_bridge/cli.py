@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 
 from .client_config import (
     BIN_PATH,
+    INTEGRATION_DISABLED_MARKER,
     INSTALL_ROOT,
     UNSANDBOXED_MARKER,
     doctor,
@@ -132,6 +133,7 @@ def uninstall_gateway() -> Dict[str, Any]:
 
 def install_client(args: argparse.Namespace) -> Dict[str, Any]:
     install_source_tree()
+    INTEGRATION_DISABLED_MARKER.unlink(missing_ok=True)
     if getattr(args, "allow_unsandboxed_fallback", False):
         UNSANDBOXED_MARKER.parent.mkdir(parents=True, exist_ok=True)
         UNSANDBOXED_MARKER.write_text(
@@ -164,6 +166,7 @@ def install_client(args: argparse.Namespace) -> Dict[str, Any]:
     result["native_router_service"] = service
     result["native_router_health"] = native_router_health(port)
     result["unsandboxed_fallback"] = UNSANDBOXED_MARKER.exists()
+    result["enabled"] = True
     return result
 
 
@@ -231,9 +234,45 @@ def select_models(values: List[str]) -> Dict[str, Any]:
 
 
 def uninstall_client() -> Dict[str, Any]:
+    INTEGRATION_DISABLED_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    INTEGRATION_DISABLED_MARKER.write_text(
+        "PCL Relay Codex integration is disabled by the user.\n",
+        encoding="utf-8",
+    )
+    os.chmod(INTEGRATION_DISABLED_MARKER, 0o600)
     service = uninstall_native_router_service()
     config = uninstall_client_config()
-    return {"service": service, "config": config}
+    return {
+        "enabled": False,
+        "official_codex_restored": True,
+        "service": service,
+        "config": config,
+    }
+
+
+def integration_status() -> Dict[str, Any]:
+    config_path = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
+    try:
+        text = config_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    desired_enabled = not INTEGRATION_DISABLED_MARKER.exists()
+    config_managed = all(
+        marker in text
+        for marker in (
+            "# >>> pcl-relay native router root >>>",
+            "# >>> pcl-codex-bridge managed block >>>",
+        )
+    )
+    router = native_router_health(timeout=1)
+    return {
+        "enabled": desired_enabled,
+        "active": desired_enabled and config_managed and bool(router.get("reachable")),
+        "config_managed": config_managed,
+        "native_router": bool(router.get("reachable")),
+        "official_codex_restored": not desired_enabled and not config_managed,
+        "restart_codex_required": desired_enabled != config_managed,
+    }
 
 
 def serve_native_router(args: argparse.Namespace) -> Dict[str, Any]:
@@ -489,6 +528,15 @@ def parser() -> argparse.ArgumentParser:
     update_install = update_actions.add_parser("install")
     update_install.add_argument("--force", action="store_true")
     update_install.set_defaults(handler=lambda a: install_latest_release(a.force))
+
+    integration = commands.add_parser("integration")
+    integration_actions = integration.add_subparsers(dest="integration_action", required=True)
+    integration_check = integration_actions.add_parser("status")
+    integration_check.set_defaults(handler=lambda a: integration_status())
+    integration_enable = integration_actions.add_parser("enable")
+    integration_enable.set_defaults(handler=install_client)
+    integration_disable = integration_actions.add_parser("disable")
+    integration_disable.set_defaults(handler=lambda a: uninstall_client())
 
     native_router = commands.add_parser("native-router", help=argparse.SUPPRESS)
     native_router.add_argument("--port", type=int, default=15724)

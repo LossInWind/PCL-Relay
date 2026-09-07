@@ -32,6 +32,7 @@ from pcl_codex_bridge.responses_protocol import (
     encode_compaction_summary,
     generate_compaction_summary,
     is_v2_compaction_request,
+    output_token_policy,
     parse_fallback_calls,
     reasoning_effort_policy,
     retained_compact_messages,
@@ -144,9 +145,9 @@ class GatewayMappingTests(unittest.TestCase):
 
     def test_compaction_rejects_empty_truncated_or_tool_output(self):
         for result, error in [
-            (("", {}, "", "stop"), "empty"),
-            (("partial", {}, "", "length"), "truncated"),
-            (("summary", {0: {"name": "shell"}}, "", "stop"), "tool calls"),
+            (("", {}, "", "stop", None), "empty"),
+            (("partial", {}, "", "length", None), "truncated"),
+            (("summary", {0: {"name": "shell"}}, "", "stop", None), "tool calls"),
         ]:
             with (
                 self.subTest(error=error),
@@ -173,8 +174,11 @@ class GatewayMappingTests(unittest.TestCase):
         try:
             with (
                 mock.patch(
-                    "pcl_codex_bridge.gateway.generate_compaction_summary",
-                    return_value="checkpoint summary",
+                    "pcl_codex_bridge.gateway.generate_compaction",
+                    return_value=(
+                        "checkpoint summary",
+                        {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
+                    ),
                 ),
                 mock.patch("pcl_codex_bridge.gateway.log"),
             ):
@@ -199,6 +203,10 @@ class GatewayMappingTests(unittest.TestCase):
                 response = connection.getresponse()
                 payload = json.loads(response.read())
                 self.assertEqual(response.status, 200)
+                self.assertEqual(payload["object"], "response.compaction")
+                self.assertTrue(payload["id"].startswith("resp_"))
+                self.assertIsInstance(payload["created_at"], int)
+                self.assertEqual(payload["usage"]["total_tokens"], 16)
                 self.assertEqual(
                     [item["type"] for item in payload["output"]],
                     ["message", "compaction"],
@@ -207,6 +215,8 @@ class GatewayMappingTests(unittest.TestCase):
                     decode_compaction_summary(payload["output"][-1]["encrypted_content"]),
                     "checkpoint summary",
                 )
+                self.assertEqual(payload["output"][0]["status"], "completed")
+                self.assertEqual(payload["output"][0]["content"][0]["text"], "keep me")
 
                 connection = http.client.HTTPConnection(
                     "127.0.0.1", server.server_port, timeout=3
@@ -293,6 +303,13 @@ class GatewayMappingTests(unittest.TestCase):
         self.assertEqual(policy["native_supported"], "false")
         self.assertIn("Codex requested xhigh", chat["messages"][0]["content"])
         self.assertNotIn("reasoning_effort", chat)
+
+    def test_reasoning_effort_reserves_output_budget(self):
+        high = {"reasoning": {"effort": "high"}, "max_output_tokens": 4096}
+        xhigh = {"reasoning": {"effort": "xhigh"}}
+        self.assertEqual(output_token_policy(high)["effective"], 8192)
+        self.assertEqual(output_token_policy(xhigh)["effective"], 12288)
+        self.assertEqual(build_chat_request(high)["max_tokens"], 8192)
 
     @staticmethod
     def _sse_events(raw: str):
@@ -404,7 +421,7 @@ class GatewayMappingTests(unittest.TestCase):
                 for event in events
                 if event.get("type") == "response.function_call_arguments.delta"
             ]
-            self.assertEqual(deltas, ['{"cmd":', '"pwd"}'])
+            self.assertEqual(deltas, ['{"cmd":"pwd"}'])
             done = next(
                 event
                 for event in events
@@ -414,6 +431,137 @@ class GatewayMappingTests(unittest.TestCase):
             self.assertEqual(done["item"]["arguments"], '{"cmd":"pwd"}')
             completed = next(event for event in events if event.get("type") == "response.completed")
             self.assertEqual(completed["response"]["metadata"]["pcl_tool_stream"], "native_delta")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_responses_repairs_large_single_string_tool_after_compaction(self):
+        patch_text = "*** Add File: /tmp/result.py\n" + ("print(\"{stable}\")\n" * 700)
+        malformed = '{"input": ' + patch_text
+
+        def tool_stream(_chat):
+            yield {
+                "kind": "tool",
+                "index": 0,
+                "call_id": "call_patch",
+                "name_delta": "apply_patch",
+                "arguments_delta": malformed[:5000],
+            }
+            yield {
+                "kind": "tool",
+                "index": 0,
+                "name_delta": "",
+                "arguments_delta": malformed[5000:],
+            }
+            yield {"kind": "finish", "reason": "tool_calls"}
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (
+                mock.patch("pcl_codex_bridge.gateway.iter_chat_completion", side_effect=tool_stream),
+                mock.patch("pcl_codex_bridge.gateway.log"),
+            ):
+                body = {
+                    "model": "GLM-5.2",
+                    "input": [
+                        {
+                            "type": "compaction",
+                            "encrypted_content": encode_compaction_summary("continue the analysis"),
+                        },
+                        {"type": "message", "role": "user", "content": "continue"},
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "apply_patch",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"input": {"type": "string"}},
+                                "required": ["input"],
+                            },
+                        }
+                    ],
+                }
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=3
+                )
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    body=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                events = self._sse_events(response.read().decode("utf-8"))
+            done = next(
+                event
+                for event in events
+                if event.get("type") == "response.output_item.done"
+                and event.get("item", {}).get("type") == "function_call"
+            )
+            self.assertEqual(json.loads(done["item"]["arguments"]), {"input": patch_text})
+            completed = next(event for event in events if event.get("type") == "response.completed")
+            self.assertEqual(completed["response"]["metadata"]["pcl_tool_argument_repairs"], "1")
+            self.assertFalse(any(event.get("type") == "response.failed" for event in events))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_responses_rejects_ambiguous_invalid_tool_arguments(self):
+        def tool_stream(_chat):
+            yield {
+                "kind": "tool",
+                "index": 0,
+                "call_id": "call_bad",
+                "name_delta": "shell",
+                "arguments_delta": '{"cmd": pwd, "timeout": }',
+            }
+            yield {"kind": "finish", "reason": "tool_calls"}
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (
+                mock.patch("pcl_codex_bridge.gateway.iter_chat_completion", side_effect=tool_stream),
+                mock.patch("pcl_codex_bridge.gateway.log"),
+            ):
+                body = {
+                    "model": "GLM-5.2",
+                    "input": [],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "shell",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "cmd": {"type": "string"},
+                                    "timeout": {"type": "integer"},
+                                },
+                                "required": ["cmd"],
+                            },
+                        }
+                    ],
+                }
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=3
+                )
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    body=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                events = self._sse_events(response.read().decode("utf-8"))
+            failed = next(event for event in events if event.get("type") == "response.failed")
+            self.assertEqual(failed["response"]["error"]["code"], "invalid_tool_arguments")
+            self.assertFalse(any(event.get("type") == "response.completed" for event in events))
         finally:
             server.shutdown()
             server.server_close()

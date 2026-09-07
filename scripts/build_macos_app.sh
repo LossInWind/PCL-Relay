@@ -5,6 +5,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DESTINATION="${1:-/Applications/PCL Relay.app}"
 STAGING="$ROOT/.build/PCL Relay.app"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+VERSION="$(tr -d '[:space:]' < "$ROOT/pcl_codex_bridge/VERSION")"
+
+if [[ ! "$VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
+  echo "Invalid canonical version: $VERSION" >&2
+  exit 1
+fi
 
 cd "$ROOT"
 swift build -c release --product PCLCodexManager
@@ -23,6 +29,8 @@ mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Resources"
 mkdir -p "$STAGING/Contents/Resources/bridge/python/bin" "$STAGING/Contents/Resources/bridge/python/lib" "$STAGING/Contents/Resources/bridge/src" "$STAGING/Contents/Resources/bridge/lib"
 cp "$ROOT/.build/release/PCLCodexManager" "$STAGING/Contents/MacOS/PCLCodexManager"
 cp "$ROOT/macos/Info.plist" "$STAGING/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$STAGING/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$STAGING/Contents/Info.plist"
 cp "$PYTHON_ROOT/bin/python3.12" "$STAGING/Contents/Resources/bridge/python/bin/python3.12"
 ln -s python3.12 "$STAGING/Contents/Resources/bridge/python/bin/python3"
 cp "$PYTHON_ROOT/lib/libpython3.12.dylib" "$STAGING/Contents/Resources/bridge/python/lib/libpython3.12.dylib"
@@ -55,6 +63,12 @@ find "$STAGING/Contents/Resources" -type f -name '*.pyc' -delete
 codesign --force --deep --sign - "$STAGING"
 chmod -R a-w "$STAGING/Contents/Resources"
 codesign --verify --deep --strict "$STAGING"
+
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$STAGING/Contents/Info.plist")"
+if [[ "$APP_VERSION" != "$VERSION" ]]; then
+  echo "App version mismatch: expected $VERSION, got $APP_VERSION" >&2
+  exit 1
+fi
 
 if [[ -e "$DESTINATION" ]]; then
   mkdir -p "$ROOT/.build/app-install-backups"

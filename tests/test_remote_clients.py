@@ -9,11 +9,56 @@ from pcl_codex_bridge.remote_clients import (
     _is_relay_candidate,
     check_client_connectivity,
     discover_remote_clients,
+    install_remote_client,
     remote_client_status,
 )
 
 
 class RemoteClientTests(unittest.TestCase):
+    def test_remote_update_prefers_verified_github_release(self):
+        completed = subprocess.CompletedProcess([], 0, b'{}\n', b"")
+        with (
+            mock.patch(
+                "pcl_codex_bridge.remote_clients._run_remote_python",
+                return_value=completed,
+            ) as run,
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.remote_client_status",
+                return_value={"ready": True, "client_version": __version__},
+            ),
+        ):
+            result = install_remote_client(
+                "linux-server", "http://127.0.0.1:15722/v1"
+            )
+        self.assertEqual(result["update_source"], "github_release")
+        self.assertEqual(run.call_count, 1)
+        source = run.call_args.args[1]
+        self.assertIn("github.com/LossInWind/PCL-Relay/releases/download", source)
+        self.assertIn("ProxyHandler({})", source)
+
+    def test_remote_update_falls_back_to_current_mac_when_github_is_unavailable(self):
+        unavailable = subprocess.CompletedProcess(
+            [], 1, b"", b"PCL_GITHUB_UNAVAILABLE: GitHub timed out"
+        )
+        installed = subprocess.CompletedProcess([], 0, b'{}\n', b"")
+        with (
+            mock.patch(
+                "pcl_codex_bridge.remote_clients._run_remote_python",
+                side_effect=[unavailable, installed],
+            ) as run,
+            mock.patch(
+                "pcl_codex_bridge.remote_clients.remote_client_status",
+                return_value={"ready": True, "client_version": __version__},
+            ),
+        ):
+            result = install_remote_client(
+                "offline-server", "http://127.0.0.1:15722/v1"
+            )
+        self.assertEqual(result["update_source"], "current_mac_fallback")
+        self.assertIn("GitHub timed out", result["github_error"])
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1].kwargs["stdin"][:2], b"\x1f\x8b")
+
     def test_remote_status_accepts_macos_and_linux_client_metadata(self):
         payload = {
             "home": "/home/test",

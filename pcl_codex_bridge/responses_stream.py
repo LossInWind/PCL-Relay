@@ -3,11 +3,110 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Dict, List, Optional
 
 from .responses_protocol import parse_fallback_calls
+
+
+class ToolArgumentsError(ValueError):
+    """A model emitted arguments that cannot safely be passed to Codex."""
+
+    def __init__(self, tool_name: str, detail: str):
+        super().__init__(f"Invalid arguments for tool {tool_name}: {detail}")
+        self.tool_name = tool_name
+
+
+def _single_string_property(schema: Dict[str, Any]) -> Optional[str]:
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict) or len(properties) != 1:
+        return None
+    name, definition = next(iter(properties.items()))
+    if not isinstance(definition, dict) or definition.get("type") != "string":
+        return None
+    return str(name)
+
+
+def _recover_single_string_argument(
+    arguments: str,
+    schema: Dict[str, Any],
+    *,
+    allow_bare: bool,
+) -> Optional[tuple[str, str]]:
+    """Recover only the unambiguous one-string-parameter tool shape."""
+    property_name = _single_string_property(schema)
+    if property_name is None:
+        return None
+    raw = arguments
+    pattern = rf'^\s*\{{\s*[\"\']{re.escape(property_name)}[\"\']\s*:\s*(.*)$'
+    match = re.match(pattern, arguments, re.S)
+    if match:
+        value = match.group(1)
+        # Unified-diff custom tools have an explicit terminator, so anything
+        # after it is certainly a broken JSON wrapper rather than patch data.
+        marker = "*** End Patch"
+        marker_at = value.rfind(marker)
+        if marker_at >= 0:
+            value = value[: marker_at + len(marker)]
+        return property_name, value
+    if allow_bare:
+        return property_name, raw
+    return None
+
+
+def _validate_function_arguments(
+    tool_name: str,
+    parsed: Dict[str, Any],
+    schema: Dict[str, Any],
+) -> None:
+    required = schema.get("required") if isinstance(schema, dict) else None
+    if isinstance(required, list):
+        missing = [str(name) for name in required if name not in parsed]
+        if missing:
+            raise ToolArgumentsError(tool_name, "missing required fields: " + ", ".join(missing))
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return
+    type_checks = {
+        "string": lambda value: isinstance(value, str),
+        "object": lambda value: isinstance(value, dict),
+        "array": lambda value: isinstance(value, list),
+        "boolean": lambda value: isinstance(value, bool),
+        "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+        "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+    }
+    for name, value in parsed.items():
+        definition = properties.get(name)
+        expected = definition.get("type") if isinstance(definition, dict) else None
+        check = type_checks.get(str(expected))
+        if check is not None and not check(value):
+            raise ToolArgumentsError(tool_name, f"field {name} must be {expected}")
+
+
+def normalize_function_arguments(
+    tool_name: str,
+    arguments: str,
+    schema: Optional[Dict[str, Any]] = None,
+) -> tuple[str, bool]:
+    """Return valid, schema-checked JSON arguments and repair metadata."""
+    raw = arguments or "{}"
+    parameters = schema or {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        recovered = _recover_single_string_argument(raw, parameters, allow_bare=False)
+        if recovered is None:
+            raise ToolArgumentsError(tool_name or "unknown", str(exc)) from exc
+        key, value = recovered
+        parsed = {key: value}
+        _validate_function_arguments(tool_name, parsed, parameters)
+        return json.dumps(parsed, ensure_ascii=False, separators=(",", ":")), True
+    if not isinstance(parsed, dict):
+        raise ToolArgumentsError(tool_name or "unknown", "arguments must be a JSON object")
+    _validate_function_arguments(tool_name, parsed, parameters)
+    return raw, False
 
 
 class SseWriter:
@@ -48,6 +147,13 @@ class ResponsesStreamBridge:
             for tool in chat.get("tools") or []
             if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
         ]
+        self.tool_schemas = {
+            str(tool["function"]["name"]): tool["function"].get("parameters") or {}
+            for tool in chat.get("tools") or []
+            if isinstance(tool, dict)
+            and isinstance(tool.get("function"), dict)
+            and tool["function"].get("name")
+        }
         self.pending_content = ""
         self.content_mode = "undecided" if self.allowed_tools else "text"
         self.content_chars = 0
@@ -55,6 +161,7 @@ class ResponsesStreamBridge:
         self.finish_reason: Optional[str] = None
         self.usage: Optional[Dict[str, Any]] = None
         self.used_fallback_tool = False
+        self.repaired_tool_arguments: List[str] = []
 
     def _allocate_index(self) -> int:
         index = self.next_output_index
@@ -267,23 +374,23 @@ class ResponsesStreamBridge:
         state["arguments"] += arguments_delta
         if not state["started"] and arguments_delta and state["name"] not in self.custom_names:
             self._start_function_tool(state)
-        if state["started"] and arguments_delta:
-            self.sse.send(
-                "response.function_call_arguments.delta",
-                {
-                    "item_id": state["id"],
-                    "output_index": state["output_index"],
-                    "delta": arguments_delta,
-                },
-            )
+        # Buffer native arguments until the complete JSON value can be
+        # validated.  Emitting an invalid prefix poisons the next Responses
+        # turn even if the final event is repaired.
 
-    @staticmethod
-    def _custom_input(arguments: str) -> str:
+    def _custom_input(self, name: str, arguments: str) -> tuple[str, bool]:
+        schema = self.tool_schemas.get(name, {})
         try:
             parsed = json.loads(arguments or "{}")
-            return str(parsed.get("input", "")) if isinstance(parsed, dict) else str(parsed)
+            if isinstance(parsed, dict):
+                key = _single_string_property(schema) or "input"
+                return str(parsed.get(key, "")), False
+            return str(parsed), False
         except ValueError:
-            return arguments or ""
+            recovered = _recover_single_string_argument(arguments, schema, allow_bare=True)
+            if recovered is None:
+                return arguments or "", False
+            return recovered[1], True
 
     def _finish_tool(self, state: Dict[str, Any]) -> None:
         custom = state["name"] in self.custom_names
@@ -291,7 +398,9 @@ class ResponsesStreamBridge:
             self._finish_reasoning()
             self._finish_text()
             index = self._allocate_index()
-            custom_input = self._custom_input(state["arguments"])
+            custom_input, repaired = self._custom_input(state["name"], state["arguments"])
+            if repaired:
+                self.repaired_tool_arguments.append(state["name"])
             started = {
                 "id": state["id"],
                 "type": "custom_tool_call",
@@ -321,17 +430,22 @@ class ResponsesStreamBridge:
         else:
             if not state["started"]:
                 self._start_function_tool(state)
-                arguments = state["arguments"] or "{}"
-                self.sse.send(
-                    "response.function_call_arguments.delta",
-                    {
-                        "item_id": state["id"],
-                        "output_index": state["output_index"],
-                        "delta": arguments,
-                    },
-                )
             index = int(state["output_index"])
-            arguments = state["arguments"] or "{}"
+            arguments, repaired = normalize_function_arguments(
+                state["name"],
+                state["arguments"],
+                self.tool_schemas.get(state["name"]),
+            )
+            if repaired:
+                self.repaired_tool_arguments.append(state["name"])
+            self.sse.send(
+                "response.function_call_arguments.delta",
+                {
+                    "item_id": state["id"],
+                    "output_index": index,
+                    "delta": arguments,
+                },
+            )
             item = {
                 "id": state["id"],
                 "type": "function_call",

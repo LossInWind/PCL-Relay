@@ -30,15 +30,18 @@ from .responses_protocol import (
     base_response,
     build_chat_request,
     encode_compaction_summary,
-    generate_compaction_summary,
+    flatten_content,
+    generate_compaction,
     is_v2_compaction_request,
     iter_chat_completion,
+    output_token_policy,
     read_api_key,
     reasoning_effort_policy,
     retained_compact_messages,
+    responses_usage,
     upstream_request,
 )
-from .responses_stream import ResponsesStreamBridge, SseWriter
+from .responses_stream import ResponsesStreamBridge, SseWriter, ToolArgumentsError
 
 
 PORT = int(os.environ.get("PCL_CODEX_GATEWAY_PORT", "15722"))
@@ -554,9 +557,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
             log(f"responses failure: {exc}\n{traceback.format_exc()}")
             return
 
-        output = bridge.finalize()
+        try:
+            output = bridge.finalize()
+        except ToolArgumentsError as exc:
+            failed = base_response(body, response_id, "failed", bridge.completed_output())
+            failed["error"] = {
+                "code": "invalid_tool_arguments",
+                "message": str(exc),
+            }
+            sse.send("response.failed", {"response": failed})
+            log(f"responses rejected malformed tool arguments tool={exc.tool_name}")
+            return
         completed = base_response(body, response_id, "completed", output)
         effort = reasoning_effort_policy(body)
+        token_policy = output_token_policy(body)
         completed["metadata"].update(
             {
                 "pcl_reasoning_chars": str(bridge.reasoning_chars),
@@ -571,40 +585,61 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     else ("native_delta" if bridge.tool_states else "none")
                 ),
                 "pcl_tool_fallback": "true" if bridge.used_fallback_tool else "false",
+                "pcl_tool_argument_repairs": str(len(bridge.repaired_tool_arguments)),
+                "pcl_tool_argument_repaired_names": ",".join(bridge.repaired_tool_arguments),
+                "pcl_max_output_tokens_requested": str(token_policy["requested"]),
+                "pcl_max_output_tokens_effective": str(token_policy["effective"]),
             }
         )
         if bridge.usage:
-            prompt_tokens = int(bridge.usage.get("prompt_tokens") or 0)
-            completion_tokens = int(bridge.usage.get("completion_tokens") or 0)
-            details = bridge.usage.get("completion_tokens_details") or {}
-            reasoning_tokens = int(details.get("reasoning_tokens") or 0) if isinstance(details, dict) else 0
-            completed["usage"] = {
-                "input_tokens": prompt_tokens,
-                "output_tokens": completion_tokens,
-                "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
-                "total_tokens": int(bridge.usage.get("total_tokens") or prompt_tokens + completion_tokens),
-            }
+            completed["usage"] = responses_usage(bridge.usage)
         log(
             "responses completed "
             f"model={body.get('model')} finish={bridge.finish_reason} content={bridge.content_chars} "
             f"reasoning={bridge.reasoning_chars} tools={len(bridge.tool_states)} "
             f"effort={effort['requested']}->{effort['effective']}:{effort['mode']} "
-            f"fallback={bridge.used_fallback_tool}"
+            f"tokens={token_policy['requested']}->{token_policy['effective']} "
+            f"fallback={bridge.used_fallback_tool} repairs={len(bridge.repaired_tool_arguments)}"
         )
         sse.send("response.completed", {"response": completed})
 
     def _responses_compact(self) -> None:
         try:
             body = json.loads(self._body().decode("utf-8"))
-            summary = generate_compaction_summary(body)
-            output = retained_compact_messages(body.get("input"))
+            summary, usage = generate_compaction(body)
+            retained = retained_compact_messages(body.get("input"))
+            output = [
+                {
+                    "id": str(item.get("id") or f"msg_{uuid.uuid4().hex}"),
+                    "type": "message",
+                    "status": "completed",
+                    "role": item.get("role", "user"),
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": flatten_content(item.get("content")),
+                        }
+                    ],
+                }
+                for item in retained
+            ]
             output.append(
                 {
+                    "id": f"cmp_{uuid.uuid4().hex}",
                     "type": "compaction",
                     "encrypted_content": encode_compaction_summary(summary),
                 }
             )
-            self._json(200, {"output": output})
+            self._json(
+                200,
+                {
+                    "id": f"resp_{uuid.uuid4().hex}",
+                    "object": "response.compaction",
+                    "created_at": int(time.time()),
+                    "output": output,
+                    "usage": responses_usage(usage),
+                },
+            )
             log(
                 "responses compact v1 completed "
                 f"model={body.get('model')} retained={len(output) - 1} summary={len(summary)}"
@@ -621,7 +656,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def _responses_compaction_v2(self, body: Dict[str, Any]) -> None:
         try:
-            summary = generate_compaction_summary(body)
+            summary, usage = generate_compaction(body)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
             self._json(
@@ -642,16 +677,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
         sse = SseWriter(self)
         response_id = f"resp_{uuid.uuid4().hex}"
         item = {
+            "id": f"cmp_{uuid.uuid4().hex}",
             "type": "compaction",
             "encrypted_content": encode_compaction_summary(summary),
         }
         sse.send("response.created", {"response": base_response(body, response_id, "in_progress", [])})
         sse.send("response.in_progress", {"response": base_response(body, response_id, "in_progress", [])})
         sse.send("response.output_item.done", {"output_index": 0, "item": item})
-        sse.send(
-            "response.completed",
-            {"response": base_response(body, response_id, "completed", [item])},
-        )
+        completed = base_response(body, response_id, "completed", [item])
+        completed["usage"] = responses_usage(usage)
+        sse.send("response.completed", {"response": completed})
         log(
             "responses compact v2 completed "
             f"model={body.get('model')} summary={len(summary)}"

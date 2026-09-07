@@ -51,6 +51,13 @@ REASONING_EFFORT_GUIDANCE = {
     "high": "Analyze thoroughly, check assumptions, and verify the result before concluding.",
     "xhigh": "Analyze very thoroughly, consider failure modes, and perform strong verification before concluding.",
 }
+REASONING_OUTPUT_TOKEN_FLOORS = {
+    "minimal": 4096,
+    "low": 4096,
+    "medium": 6144,
+    "high": 8192,
+    "xhigh": 12288,
+}
 
 
 def read_api_key() -> str:
@@ -276,6 +283,33 @@ def reasoning_effort_policy(body: Dict[str, Any]) -> Dict[str, str]:
         "guidance": REASONING_EFFORT_GUIDANCE[normalized],
     }
 
+
+def output_token_policy(body: Dict[str, Any]) -> Dict[str, int]:
+    """Keep enough room for both reasoning and a visible answer/tool call.
+
+    Responses ``max_output_tokens`` includes reasoning tokens.  PCL reasoning
+    models can otherwise consume the old 4096-token default before emitting a
+    tool call.  A caller may still request a larger ceiling; we only raise
+    undersized/default values to the configurable effort floor.
+    """
+    effort = reasoning_effort_policy(body)["effective"]
+    default = int(os.environ.get("PCL_CODEX_DEFAULT_MAX_TOKENS", "4096"))
+    floor = int(
+        os.environ.get(
+            f"PCL_CODEX_{effort.upper()}_MIN_TOKENS",
+            str(REASONING_OUTPUT_TOKEN_FLOORS[effort]),
+        )
+    )
+    raw_requested = body.get("max_output_tokens")
+    requested = int(raw_requested) if raw_requested is not None else default
+    effective = max(requested, floor)
+    cap = int(os.environ.get("PCL_CODEX_MAX_TOKENS_CAP", "32768"))
+    return {
+        "requested": requested,
+        "floor": floor,
+        "effective": min(effective, cap),
+    }
+
 def append_system_instruction(messages: List[Dict[str, Any]], instruction: str) -> None:
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = str(messages[0].get("content", "")) + "\n\n" + instruction
@@ -302,9 +336,7 @@ def build_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
     if tools:
         request["tools"] = tools
         request["tool_choice"] = body.get("tool_choice", "auto")
-    request["max_tokens"] = body.get("max_output_tokens") or int(
-        os.environ.get("PCL_CODEX_DEFAULT_MAX_TOKENS", "4096")
-    )
+    request["max_tokens"] = output_token_policy(body)["effective"]
     return request
 
 
@@ -335,11 +367,12 @@ def build_compaction_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
 
 def collect_chat_completion(
     chat: Dict[str, Any],
-) -> Tuple[str, Dict[int, Dict[str, Any]], str, Optional[str]]:
+) -> Tuple[str, Dict[int, Dict[str, Any]], str, Optional[str], Optional[Dict[str, Any]]]:
     content = ""
     tool_states: Dict[int, Dict[str, Any]] = {}
     reasoning = ""
     finish_reason: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
     for event in iter_chat_completion(chat):
         kind = event.get("kind")
         if kind == "content":
@@ -348,6 +381,8 @@ def collect_chat_completion(
             reasoning += str(event.get("delta") or "")
         elif kind == "finish":
             finish_reason = str(event.get("reason") or "") or finish_reason
+        elif kind == "usage" and isinstance(event.get("usage"), dict):
+            usage = dict(event["usage"])
         elif kind == "tool":
             index = int(event.get("index") or 0)
             state = tool_states.setdefault(
@@ -363,7 +398,7 @@ def collect_chat_completion(
                 state["call_id"] = event["call_id"]
             state["name"] += str(event.get("name_delta") or "")
             state["arguments"] += str(event.get("arguments_delta") or "")
-    return content, tool_states, reasoning, finish_reason
+    return content, tool_states, reasoning, finish_reason, usage
 
 
 def _completion_chunk_events(chunk: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
@@ -413,8 +448,8 @@ def iter_chat_completion(chat: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
             yield from _completion_chunk_events(json.loads("\n".join(plain_lines)))
 
 
-def generate_compaction_summary(body: Dict[str, Any]) -> str:
-    content, tool_states, _, finish_reason = collect_chat_completion(
+def generate_compaction(body: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
+    content, tool_states, _, finish_reason, usage = collect_chat_completion(
         build_compaction_chat_request(body)
     )
     summary = content.strip()
@@ -424,7 +459,33 @@ def generate_compaction_summary(body: Dict[str, Any]) -> str:
         raise RuntimeError("PCL compaction summary was truncated")
     if not summary:
         raise RuntimeError("PCL compaction returned an empty summary")
-    return summary
+    return summary, usage
+
+
+def generate_compaction_summary(body: Dict[str, Any]) -> str:
+    """Backward-compatible summary-only helper for library callers."""
+    return generate_compaction(body)[0]
+
+
+def responses_usage(usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    source = usage or {}
+    prompt_tokens = int(source.get("prompt_tokens") or source.get("input_tokens") or 0)
+    completion_tokens = int(
+        source.get("completion_tokens") or source.get("output_tokens") or 0
+    )
+    details = source.get("completion_tokens_details") or source.get("output_tokens_details") or {}
+    reasoning_tokens = int(details.get("reasoning_tokens") or 0) if isinstance(details, dict) else 0
+    return {
+        "input_tokens": prompt_tokens,
+        "input_tokens_details": {
+            "cached_tokens": int((source.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+            if isinstance(source.get("prompt_tokens_details"), dict)
+            else 0
+        },
+        "output_tokens": completion_tokens,
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
+        "total_tokens": int(source.get("total_tokens") or prompt_tokens + completion_tokens),
+    }
 
 
 def retained_compact_messages(inputs: Any) -> List[Dict[str, Any]]:

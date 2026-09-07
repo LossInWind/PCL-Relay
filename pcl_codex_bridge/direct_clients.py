@@ -5,7 +5,9 @@ import struct
 import urllib.parse
 from typing import Any, Dict
 
+from . import __version__
 from .models import DEFAULT_GATEWAY_URL, load_registry
+from .release_updater import CLIENT_ASSET_NAME, REPOSITORY
 from .remote_clients import (
     _node_ssh_target,
     _run_remote_python,
@@ -54,7 +56,7 @@ sys.stdout.buffer.write(data)
 
 
 REMOTE_DIRECT_INSTALL = r'''
-import io, json, os, pathlib, shutil, struct, subprocess, sys, tarfile, time, urllib.request
+import hashlib, io, json, os, pathlib, shutil, struct, subprocess, sys, tarfile, time, urllib.request
 
 header = sys.stdin.buffer.read(8)
 if len(header) != 8:
@@ -62,8 +64,38 @@ if len(header) != 8:
 key_length = struct.unpack("!Q", header)[0]
 key = sys.stdin.buffer.read(key_length)
 archive_data = sys.stdin.buffer.read()
-if len(key) < 16 or not archive_data:
+if len(key) < 16:
     raise SystemExit("incomplete direct-install payload")
+
+expected_version = os.environ["PCL_REMOTE_EXPECTED_VERSION"]
+force_mac_fallback = os.environ.get("PCL_REMOTE_FORCE_MAC_FALLBACK") == "1"
+update_source = "current_mac_fallback" if force_mac_fallback else "github_release"
+github_error = ""
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+headers = {"User-Agent": "PCL-Relay-Remote-Updater/" + expected_version}
+
+def download(url, limit):
+    request = urllib.request.Request(url, headers=headers)
+    with opener.open(request, timeout=45) as response:
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise RuntimeError("GitHub Release client asset exceeds the safety limit")
+    return data
+
+if force_mac_fallback:
+    if not archive_data:
+        raise SystemExit("current Mac fallback archive is missing")
+else:
+    try:
+        checksum = download(os.environ["PCL_REMOTE_RELEASE_CHECKSUM"], 4096).decode("utf-8", "replace").strip().split()[0].lower()
+        if len(checksum) != 64 or any(character not in "0123456789abcdef" for character in checksum):
+            raise RuntimeError("GitHub Release client checksum is invalid")
+        github_archive = download(os.environ["PCL_REMOTE_RELEASE_ARCHIVE"], 64 * 1024 * 1024)
+        if hashlib.sha256(github_archive).hexdigest() != checksum:
+            raise RuntimeError("GitHub Release client checksum verification failed")
+        archive_data = github_archive
+    except Exception as exc:
+        raise SystemExit(f"PCL_GITHUB_UNAVAILABLE: {type(exc).__name__}: {exc}")
 
 persistent_parent = pathlib.Path("/home/zhc")
 if not persistent_parent.is_dir() or not os.access(persistent_parent, os.W_OK):
@@ -76,7 +108,18 @@ for directory in (package_root, config_root, state_root):
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
 with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as archive:
+    for member in archive.getmembers():
+        destination = (package_root / member.name).resolve()
+        if os.path.commonpath((str(package_root.resolve()), str(destination))) != str(package_root.resolve()):
+            raise SystemExit("client archive contains an unsafe path")
+        if member.issym() or member.islnk():
+            raise SystemExit("client archive contains an unsupported link")
     archive.extractall(package_root)
+packaged_version = (package_root / "pcl_codex_bridge" / "VERSION").read_text(encoding="utf-8").strip()
+if packaged_version != expected_version:
+    raise SystemExit(
+        "client version mismatch: expected " + expected_version + ", got " + packaged_version
+    )
 key_path = config_root / "api-key"
 key_path.write_bytes(key + b"\n")
 os.chmod(key_path, 0o600)
@@ -136,6 +179,9 @@ print(json.dumps({
     "persistent_root": str(root),
     "key_mode": oct(key_path.stat().st_mode & 0o777),
     "system": __import__("platform").system(),
+    "client_version": packaged_version,
+    "update_source": update_source,
+    "github_error": github_error if update_source == "current_mac_fallback" else "",
 }))
 '''
 
@@ -157,18 +203,52 @@ def install_local_direct(target: str) -> Dict[str, Any]:
     node_name = str(target_node.get("node_name") or target)
     relay_target = _selected_relay_ssh_target(selected_gateway)
     key = _read_relay_key(relay_target)
-    archive = _source_archive()
-    payload = struct.pack("!Q", len(key)) + key + archive
-    source = (
-        "import os\n"
-        + "os.environ['PCL_RELAY_COORDINATOR_URL'] = " + repr(selected_gateway.rstrip("/")) + "\n"
-        + "os.environ['PCL_RELAY_NODE_ID'] = " + repr(node_id) + "\n"
-        + "os.environ['PCL_RELAY_NODE_NAME'] = " + repr(node_name) + "\n"
-        + REMOTE_DIRECT_INSTALL
+    key_payload = struct.pack("!Q", len(key)) + key
+
+    def install_source(force_mac_fallback: bool) -> str:
+        return (
+            "import os\n"
+            + "os.environ['PCL_RELAY_COORDINATOR_URL'] = " + repr(selected_gateway.rstrip("/")) + "\n"
+            + "os.environ['PCL_RELAY_NODE_ID'] = " + repr(node_id) + "\n"
+            + "os.environ['PCL_RELAY_NODE_NAME'] = " + repr(node_name) + "\n"
+            + "os.environ['PCL_REMOTE_EXPECTED_VERSION'] = " + repr(__version__) + "\n"
+            + "os.environ['PCL_REMOTE_RELEASE_ARCHIVE'] = "
+            + repr(
+                f"https://github.com/{REPOSITORY}/releases/download/v{__version__}/{CLIENT_ASSET_NAME}"
+            )
+            + "\n"
+            + "os.environ['PCL_REMOTE_RELEASE_CHECKSUM'] = "
+            + repr(
+                f"https://github.com/{REPOSITORY}/releases/download/v{__version__}/{CLIENT_ASSET_NAME}.sha256"
+            )
+            + "\n"
+            + "os.environ['PCL_REMOTE_FORCE_MAC_FALLBACK'] = " + repr("1" if force_mac_fallback else "0") + "\n"
+            + REMOTE_DIRECT_INSTALL
+        )
+
+    result = _run_remote_python(
+        target,
+        install_source(False),
+        stdin=key_payload,
+        timeout=120,
     )
-    result = _run_remote_python(target, source, stdin=payload, timeout=120)
+    github_error = ""
+    payload = b""
+    if result.returncode != 0:
+        github_error = result.stderr.decode("utf-8", "replace").strip()
+        if "PCL_GITHUB_UNAVAILABLE:" not in github_error:
+            raise RuntimeError(github_error or "Local direct installation failed")
+        archive = _source_archive()
+        payload = key_payload + archive
+        result = _run_remote_python(
+            target,
+            install_source(True),
+            stdin=payload,
+            timeout=120,
+        )
     # Drop the only local reference as soon as the transfer completes.
     key = b""
+    key_payload = b""
     payload = b""
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "Local direct installation failed")
@@ -184,4 +264,6 @@ def install_local_direct(target: str) -> Dict[str, Any]:
         "pcl_key_location": "remote_only_mode_0600",
         "mac_disk_key_copy": False,
         "vscode_reload_required": True,
+        "update_source": installed.get("update_source", "current_mac_fallback"),
+        "github_error": github_error if installed.get("update_source") == "current_mac_fallback" else "",
     }

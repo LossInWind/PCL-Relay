@@ -30,8 +30,9 @@ ChatGPT Codex 后端       Tailnet 中转站:15722 -> PCL API
 - PCL 模型写入 Codex 原生 multi-agent v2 目录，并同步为 `~/.codex/agents/*.toml` custom roles。主 GPT 通过原生 `spawn_agent`/角色调用，创建、进度和结果显示在 Codex 自己的任务界面中。
 - 混合 provider 使用非保留的 `agents` V2 协作命名空间；路由只取消任务正文的 OpenAI 私有加密标记，保留官方 reasoning 密文与登录边界，因此 PCL 子 Agent 能读懂父任务。
 - 子 Agent 自动继承当前 Codex / VS Code 工作区，无需在 PCL Relay 中再选择目录。
-- PCL 上游的正文、可读推理轨迹和原生工具参数会逐段转换为 Responses 事件，因此 Codex 能按自身界面能力实时展示；仅 Kimi 等模型使用的严格 JSON 工具兼容协议会缓冲到完整 JSON 后再执行，避免半截参数被误运行。
+- PCL 上游的正文和可读推理轨迹会逐段转换为 Responses 事件；工具参数统一缓冲到完整值后，按工具声明验证为合法 JSON 才交给 Codex。单字符串自由文本工具可做确定性恢复，其他坏参数返回明确协议错误，不会污染下一轮上下文或伪装成网络断线。
 - PCL API 当前未公开原生 `reasoning_effort` 参数。Codex 的 low / medium / high / xhigh 会采用明确标注的提示词兼容映射，请求值、实际映射和降级方式同时写入响应元数据与中转站日志。
+- Responses 的 `max_output_tokens` 同时包含推理与可见输出。PCL Relay 会按推理强度保留最低总预算（high 为 8192、xhigh 为 12288，可通过环境变量调整），避免推理耗尽预算后丢失正文或工具调用。
 - PCL 子 Agent 支持 Codex 原生远程上下文压缩：旧版 `/responses/compact` 与新版 `compaction_trigger` 均由所选 PCL 模型生成检查点摘要，并使用与 OpenCodex / CCSwitchMulti 兼容的 `ocx1` 信封安全续跑；压缩不会退回 GPT，也不会把 PCL Key 发到客户端。
 - MCP 只保留模型发现和健康状态，不执行任务，也不再启动外部 `codex exec`。
 
@@ -46,6 +47,8 @@ macOS 的 **PCL Relay.app** 按用户任务收成三个联动页面：
 - **PCL 门户**：只负责通过当前中转站打开 API 广场、用量和 Key 页面；使用隔离浏览器资料，不修改 macOS 全局代理。
 
 PCL Relay 作为菜单栏应用运行：关闭完整设置不会退出，右上角图标可直接刷新网络、检测模型、打开门户或进入 Agent 设置。应用使用 macOS 登录项自动启动，不使用 KeepAlive；用户选择“退出应用”后不会在当前登录会话被强行拉起。
+
+菜单栏和完整设置均提供“Codex PCL 子 Agent”总开关。关闭后停止本机回环路由并只移除 PCL Relay 管理的配置、目录和角色，Codex 恢复官方 provider 与原有登录；关闭状态会持久化，App 重启后不会自动重新启用。
 
 Embedding、重排序、语音、OCR 和图像模型可以在模型目录中查看，但不会被误注册成代码子 Agent。
 
@@ -70,8 +73,9 @@ open -a "PCL Relay"
 
 - 本机从 [`LossInWind/PCL-Relay` GitHub Releases](https://github.com/LossInWind/PCL-Relay/releases) 检查、下载并校验正式安装包。
 - 本机升级并重新打开后，可把同一版本一键同步到所有可管理的 macOS/Linux 远端客户端。
-- 远端设备通过当前 Mac 接收客户端，不要求直接访问 GitHub；不能访问公网的 A6000 Pod 也可以升级。
+- 远端设备优先直接下载并校验 GitHub Release 的跨平台客户端；只有 GitHub 不可达、资产缺失或校验失败时，才通过当前 Mac 接收完全相同的版本。不能访问公网的 A6000 Pod 仍可升级。
 - 单台设备仍可在自己的设备行中刷新、测试连通性或执行接入/修复/升级。
+- `pcl_codex_bridge/VERSION` 是唯一版本源；App 安装包、Python 客户端、中转站健康检查、设备心跳和远端期望版本在构建与安装时都从它生成并核对。
 
 ## 使用原生子 Agent
 

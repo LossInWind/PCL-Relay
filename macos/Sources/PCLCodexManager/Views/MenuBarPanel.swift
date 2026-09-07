@@ -55,6 +55,22 @@ struct MenuBarPanel: View {
             .padding(12)
             .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
+            Toggle(
+                isOn: Binding(
+                    get: { model.integrationEnabled },
+                    set: { model.setIntegrationEnabled($0) }
+                )
+            ) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Codex PCL 子 Agent").font(.subheadline.weight(.semibold))
+                    Text(model.integrationEnabled ? "已启用；官方 GPT 保持不变" : "已关闭；当前仅使用官方 GPT")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(model.isTogglingIntegration)
+
             HStack(spacing: 8) {
                 Button {
                     model.refreshAll()

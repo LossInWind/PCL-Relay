@@ -39,6 +39,8 @@ final class AppModel: ObservableObject {
     @Published var launchAtLoginEnabled = false
     @Published var launchAtLoginStatusText = "正在配置登录启动"
     @Published var codexReloadRequired = false
+    @Published var integrationEnabled = true
+    @Published var isTogglingIntegration = false
 
     let runner = CommandRunner()
     private let loginItemManager = LoginItemManager()
@@ -160,6 +162,14 @@ final class AppModel: ObservableObject {
                 guard doctorResult.exitCode == 0 else { throw commandError(doctorResult) }
                 doctor = try BridgeDecode.value(DoctorStatus.self, from: doctorResult.stdout)
 
+                let integrationResult = try await runCLI(["integration", "status"])
+                if integrationResult.exitCode == 0,
+                   let data = integrationResult.stdout.data(using: .utf8),
+                   let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let enabled = payload["enabled"] as? Bool {
+                    integrationEnabled = enabled
+                }
+
                 let registryResult = try await runCLI(["models", "show"])
                 if registryResult.exitCode == 0 {
                     let decoded = try BridgeDecode.value(ModelRegistry.self, from: registryResult.stdout)
@@ -205,6 +215,20 @@ final class AppModel: ObservableObject {
         guard !didBootstrapClient else { return }
         guard let bundledCLIURL,
               FileManager.default.isExecutableFile(atPath: bundledCLIURL.path) else { return }
+        let integrationResult = try await runner.run(
+            id: UUID(),
+            executable: bundledCLIURL,
+            arguments: ["integration", "status"]
+        )
+        if integrationResult.exitCode == 0,
+           let data = integrationResult.stdout.data(using: .utf8),
+           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           payload["enabled"] as? Bool == false {
+            integrationEnabled = false
+            didBootstrapClient = true
+            return
+        }
+        integrationEnabled = true
         let wasInstalled = FileManager.default.isExecutableFile(atPath: installedCLIURL.path)
         if !localClientNeedsBootstrap() {
             didBootstrapClient = true

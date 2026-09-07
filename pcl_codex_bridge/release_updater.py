@@ -19,6 +19,7 @@ from . import __version__
 REPOSITORY = "LossInWind/PCL-Relay"
 RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 MAC_ASSET_NAME = "PCL-Relay-macOS.zip"
+CLIENT_ASSET_NAME = "PCL-Relay-client.tar.gz"
 MAX_ASSET_BYTES = 1024 * 1024 * 1024
 
 

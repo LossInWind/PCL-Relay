@@ -3,6 +3,7 @@ import subprocess
 import unittest
 from unittest import mock
 
+from pcl_codex_bridge import __version__
 from pcl_codex_bridge.direct_clients import install_local_direct
 
 
@@ -19,7 +20,7 @@ class DirectClientTests(unittest.TestCase):
             ]
         }
         self.installed = json.dumps(
-            {"update_source": "github_release", "client_version": "2.5.2"}
+            {"update_source": "github_release", "client_version": __version__}
         ).encode("utf-8")
 
     def common_patches(self):

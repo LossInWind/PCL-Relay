@@ -28,6 +28,7 @@ from .models import (
 from .native_router import DEFAULT_PORT as NATIVE_ROUTER_DEFAULT_PORT
 from .native_router import PCL_MODEL_PREFIX, SERVICE_NAME as NATIVE_ROUTER_SERVICE
 from .http_client import gateway_root, request_json
+from .official_network import resolve_official_proxy
 from .relay_discovery import find_tailscale
 from .zstd_codec import library_source as zstd_library_source
 
@@ -745,27 +746,16 @@ def choose_native_router_port() -> int:
 
 
 def detect_official_proxy() -> str:
+    """Read a configured official route without guessing local proxy ports.
+
+    Haichen Services owns proxy discovery, subscriptions, node selection and
+    network recovery.  PCL Relay only consumes its published endpoint (or an
+    explicit environment/previously saved value) and later validates the
+    resulting official route.
+    """
     registry = load_registry()
-    candidates = [
-        os.environ.get("PCL_RELAY_OFFICIAL_PROXY", ""),
-        os.environ.get("HTTPS_PROXY", ""),
-        os.environ.get("https_proxy", ""),
-        str(registry.get("official_proxy") or ""),
-    ]
-    for port in (17731, 17890, 7890):
-        candidates.append(f"http://127.0.0.1:{port}")
-    seen = set()
-    for value in candidates:
-        value = value.strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        parsed = urllib.parse.urlparse(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or not parsed.port:
-            continue
-        if probe_official_proxy(value):
-            return value
-    return ""
+    proxy, _source = resolve_official_proxy(str(registry.get("official_proxy") or ""))
+    return proxy
 
 
 def probe_official_proxy(value: str, timeout: float = 4.0) -> bool:
@@ -1029,6 +1019,7 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
         "official_route_http_status": 0,
         "official_route_latency_ms": 0,
         "official_route_error": "",
+        "official_proxy_source": "unknown",
         "registry": (Path.home() / ".config" / "pcl-codex-bridge" / "models.json").exists(),
         "unsandboxed_fallback": UNSANDBOXED_MARKER.exists(),
     }
@@ -1075,6 +1066,7 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
     result["official_route_http_status"] = int(router.get("official_route_http_status") or 0)
     result["official_route_latency_ms"] = int(router.get("official_route_latency_ms") or 0)
     result["official_route_error"] = str(router.get("official_route_error") or "")
+    result["official_proxy_source"] = str(router.get("official_proxy_source") or "unknown")
     result["profile"] = result["native_router"]
     try:
         health = request_json(gateway_root(gateway_url).rsplit("/v1", 1)[0] + "/healthz", timeout=10)

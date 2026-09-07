@@ -26,7 +26,7 @@ struct RelayOverviewCard: View {
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
                 Text("当前中转站：\(currentName)")
                     .font(.subheadline.weight(.medium))
-                Text("官方 GPT 保持不变；PCL 模型通过 Tailnet 中转或服务器本机直连接入。")
+                Text("\(model.officialRouteOwnershipText)；PCL 模型通过 Tailnet 中转或服务器本机直连接入。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

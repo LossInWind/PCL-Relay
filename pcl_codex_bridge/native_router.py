@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from . import __version__
 from .models import DEFAULT_GATEWAY_URL, load_registry
+from .official_network import resolve_official_proxy
 from .zstd_codec import decompress as zstd_decompress
 
 
@@ -362,7 +363,17 @@ def rewrite_official_body(payload: Dict[str, Any], decoded: bytes) -> bytes:
 
 
 def official_proxy_url() -> str:
-    return os.environ.get("PCL_RELAY_OFFICIAL_PROXY", "").strip()
+    proxy, _source = resolve_official_proxy(
+        os.environ.get("PCL_RELAY_OFFICIAL_PROXY", "")
+    )
+    return proxy
+
+
+def official_proxy_source() -> str:
+    _proxy, source = resolve_official_proxy(
+        os.environ.get("PCL_RELAY_OFFICIAL_PROXY", "")
+    )
+    return source
 
 
 def probe_official_route(
@@ -758,6 +769,7 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
                     "gateway_reachable": gateway_ok,
                     "gateway_error": error,
                     "official_route": "chatgpt-forward",
+                    "official_proxy_source": official_proxy_source(),
                     "official_route_reachable": bool(official.get("reachable")),
                     "official_route_http_status": int(official.get("http_status") or 0),
                     "official_route_latency_ms": int(official.get("latency_ms") or 0),

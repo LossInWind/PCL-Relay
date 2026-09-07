@@ -21,7 +21,10 @@ if [[ "$APP_VERSION" != "$VERSION" ]]; then
   exit 1
 fi
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
-/usr/bin/tar -czf "$CLIENT_ARCHIVE" -C "$ROOT" pcl_codex_bridge LICENSE NOTICE
+COPYFILE_DISABLE=1 /usr/bin/tar \
+  --exclude='__pycache__' \
+  --exclude='*.py[co]' \
+  -czf "$CLIENT_ARCHIVE" -C "$ROOT" pcl_codex_bridge LICENSE NOTICE
 
 (
   cd "$DIST"

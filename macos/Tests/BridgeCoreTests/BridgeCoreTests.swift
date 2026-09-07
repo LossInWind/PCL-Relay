@@ -18,12 +18,13 @@ final class BridgeCoreTests: XCTestCase {
     }
 
     func testDecodesDoctorWithoutCredentialMaterial() throws {
-        let json = #"{"gateway":true,"tailscale":true,"codex":true,"config_managed":true,"profile":true,"catalog":true,"registry":true,"unsandboxed_fallback":false,"official_route_reachable":true,"official_route_http_status":401,"official_route_latency_ms":82,"official_route_error":""}"#
+        let json = #"{"gateway":true,"tailscale":true,"codex":true,"config_managed":true,"profile":true,"catalog":true,"registry":true,"unsandboxed_fallback":false,"official_route_reachable":true,"official_route_http_status":401,"official_route_latency_ms":82,"official_route_error":"","official_proxy_source":"haichen-services"}"#
         let doctor = try BridgeDecode.value(DoctorStatus.self, from: json)
         XCTAssertTrue(doctor.gateway)
         XCTAssertFalse(doctor.unsandboxedFallback)
         XCTAssertTrue(doctor.officialRouteReachable == true)
         XCTAssertEqual(doctor.officialRouteHTTPStatus, 401)
+        XCTAssertEqual(doctor.officialProxySource, "haichen-services")
     }
 
     func testDecodesDiscoveredModelDetails() throws {

@@ -133,6 +133,7 @@ pcl-codex updates install
 - 官方透传只允许必要的 Codex 身份与任务元数据头，Cookie 和任意入站头不会跨信任边界。
 - 安装器只管理带标记的 `~/.codex/config.toml` 区块，并在修改前创建备份；检测到冲突的用户自定义根路由时会停止。
 - 远端安装使用普通用户权限，不重启 SSH、VS Code、Tailscale 或服务器上的其他任务，也不占用已有的 17731/17890 反向代理端口。
+- 网络职责保持单一：PCL Relay 只读取并验证官方 GPT 的既有出口；Clash 订阅、节点优选、系统代理与非 PCL 网络修复交给 Haichen Services。Relay 不扫描常见代理端口，也不主动切换网络。
 - 每台客户端动态选择空闲的本机回环端口，因此共享服务器上的其他用户不会复用本用户的路由进程。
 - 显式启用的全局 `multi_agent_v2=true` 会阻止跨 provider v1 路由，`doctor` 会将其报告为未就绪。
 

@@ -113,8 +113,21 @@ final class AppModel: ObservableObject {
 
     var networkStatusTitle: String {
         if !relayReady { return "中转站异常" }
-        if !officialRouteReady { return "GPT 链路异常" }
+        if !officialRouteReady {
+            return doctor?.officialProxySource == "haichen-services"
+                ? "GPT 网络异常 · 请检查 Haichen Services"
+                : "GPT 链路异常"
+        }
         return "网络正常"
+    }
+
+    var officialRouteOwnershipText: String {
+        switch doctor?.officialProxySource {
+        case "haichen-services": return "官方 GPT 出口由 Haichen Services 管理"
+        case "PCL_RELAY_OFFICIAL_PROXY", "HTTPS_PROXY", "https_proxy", "registry":
+            return "官方 GPT 使用已配置出口；PCL Relay 只读验证"
+        default: return "官方 GPT 使用系统网络；PCL Relay 只读验证"
+        }
     }
 
     var allDiscoveredModels: [DiscoveredModel] {

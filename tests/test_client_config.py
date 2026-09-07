@@ -175,7 +175,18 @@ class ClientConfigTests(unittest.TestCase):
                 install_source_tree(source)
             copytree.assert_not_called()
 
-    def test_proxy_detection_accepts_any_subscription_with_real_official_http(self):
+    def test_proxy_detection_consumes_haichen_services_contract(self):
+        with (
+            mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
+            mock.patch(
+                "pcl_codex_bridge.official_network.haichen_services_proxy",
+                return_value="http://127.0.0.1:12450",
+            ),
+        ):
+            selected = detect_official_proxy()
+        self.assertEqual(selected, "http://127.0.0.1:12450")
+
+    def test_proxy_detection_does_not_guess_open_local_ports(self):
         with (
             mock.patch.dict(
                 os.environ,
@@ -188,13 +199,14 @@ class ClientConfigTests(unittest.TestCase):
             ),
             mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
             mock.patch(
-                "pcl_codex_bridge.client_config.probe_official_proxy",
-                side_effect=lambda value: value.endswith(":7890"),
-            ) as probe,
+                "pcl_codex_bridge.official_network.haichen_services_proxy",
+                return_value=None,
+            ),
+            mock.patch("pcl_codex_bridge.client_config.probe_official_proxy") as probe,
         ):
             selected = detect_official_proxy()
-        self.assertEqual(selected, "http://127.0.0.1:7890")
-        self.assertGreaterEqual(probe.call_count, 3)
+        self.assertEqual(selected, "")
+        probe.assert_not_called()
 
     def test_deep_router_health_explicitly_probes_official_route(self):
         with (

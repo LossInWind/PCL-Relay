@@ -24,6 +24,7 @@ public struct DoctorStatus: Codable, Equatable, Sendable {
     public let officialRouteHTTPStatus: Int?
     public let officialRouteLatencyMS: Int?
     public let officialRouteError: String?
+    public let officialProxySource: String?
 
     enum CodingKeys: String, CodingKey {
         case gateway, tailscale, codex, profile, catalog, registry, delegation
@@ -43,6 +44,7 @@ public struct DoctorStatus: Codable, Equatable, Sendable {
         case officialRouteHTTPStatus = "official_route_http_status"
         case officialRouteLatencyMS = "official_route_latency_ms"
         case officialRouteError = "official_route_error"
+        case officialProxySource = "official_proxy_source"
     }
 }
 

@@ -5,6 +5,7 @@ import gzip
 import json
 import os
 import platform
+import select
 import shutil
 import socket
 import ssl
@@ -18,7 +19,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from . import __version__
 from .models import DEFAULT_GATEWAY_URL, load_registry
@@ -35,16 +36,29 @@ OPENAI_CODEX_BASE_URL = os.environ.get(
     "https://chatgpt.com/backend-api/codex",
 ).rstrip("/")
 MAX_REQUEST_BYTES = 96 * 1024 * 1024
-# Keep the caller's current turn alive long enough for Haichen Services to
-# validate and replace a bad Clash node after the first transport failure.
-OFFICIAL_OPEN_RETRY_DELAYS = (
-    1.0,
-    3.0,
-    6.0,
-    10.0,
-    15.0,
-    20.0,
-) + (30.0,) * 18
+# Opening the official stream must either produce response headers promptly or
+# fail visibly. Long recovery belongs to Codex/the operator, not to a silent
+# request handler that leaves the UI stuck at "thinking".
+OFFICIAL_OPEN_RETRY_DELAYS = (0.5, 1.0)
+OFFICIAL_FIRST_BYTE_DEADLINE = float(
+    os.environ.get("PCL_RELAY_OFFICIAL_FIRST_BYTE_DEADLINE", "15")
+)
+OFFICIAL_OPEN_ATTEMPT_TIMEOUT = float(
+    os.environ.get("PCL_RELAY_OFFICIAL_OPEN_ATTEMPT_TIMEOUT", "5")
+)
+OFFICIAL_HEALTH_CACHE_SECONDS = float(
+    os.environ.get("PCL_RELAY_OFFICIAL_HEALTH_CACHE_SECONDS", "30")
+)
+_official_health_lock = threading.Lock()
+_official_health_cache: Dict[str, Any] = {}
+
+
+class OfficialRouteUnavailable(ConnectionError):
+    """The official ChatGPT route did not produce response headers in time."""
+
+
+class ClientDisconnected(ConnectionError):
+    """The local Codex caller left while an upstream request was opening."""
 
 # Forward only the caller identity and Codex request metadata needed by the
 # official backend. This list follows the MIT-licensed OpenCodex forward-mode
@@ -351,6 +365,98 @@ def official_proxy_url() -> str:
     return os.environ.get("PCL_RELAY_OFFICIAL_PROXY", "").strip()
 
 
+def probe_official_route(
+    proxy: Optional[str] = None,
+    *,
+    timeout: float = 4.0,
+    use_cache: bool = True,
+) -> Dict[str, Any]:
+    """Verify TLS and HTTP through the configured proxy without credentials."""
+    selected_proxy = official_proxy_url() if proxy is None else proxy.strip()
+    cache_key = selected_proxy or "system"
+    now = time.monotonic()
+    with _official_health_lock:
+        cached = (
+            dict(_official_health_cache)
+            if _official_health_cache.get("key") == cache_key
+            else {}
+        )
+    if (
+        use_cache
+        and cached
+        and now - float(cached.get("checked_at", 0)) < OFFICIAL_HEALTH_CACHE_SECONDS
+    ):
+        return {
+            key: value
+            for key, value in cached.items()
+            if key not in {"key", "checked_at"}
+        }
+
+    started = time.monotonic()
+    if selected_proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler(
+                {"http": selected_proxy, "https": selected_proxy}
+            )
+        )
+    else:
+        opener = urllib.request.build_opener()
+    request = urllib.request.Request(
+        OPENAI_CODEX_BASE_URL + "/models",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": f"PCL-Relay/{SERVICE_VERSION}",
+        },
+        method="GET",
+    )
+    status = 0
+    error = ""
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    reachable = bool(status and status != 407)
+    result = {
+        "reachable": reachable,
+        "proxy": selected_proxy,
+        "http_status": status,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "error": error,
+    }
+    with _official_health_lock:
+        _official_health_cache.clear()
+        _official_health_cache.update({"key": cache_key, "checked_at": now, **result})
+    return result
+
+
+def cached_official_route() -> Dict[str, Any]:
+    """Return the latest matching probe without blocking the health endpoint."""
+    cache_key = official_proxy_url() or "system"
+    with _official_health_lock:
+        if _official_health_cache.get("key") != cache_key:
+            return {
+                "reachable": False,
+                "proxy": official_proxy_url(),
+                "http_status": 0,
+                "latency_ms": 0,
+                "error": "not_checked",
+            }
+        return {
+            key: value
+            for key, value in _official_health_cache.items()
+            if key not in {"key", "checked_at"}
+        }
+
+
+def _official_health_loop(stop: threading.Event) -> None:
+    while not stop.is_set():
+        probe_official_route(timeout=4.0, use_cache=False)
+        stop.wait(max(5.0, OFFICIAL_HEALTH_CACHE_SECONDS))
+
+
 def opener_for(route: str) -> urllib.request.OpenerDirector:
     if route == "pcl":
         # Tailnet traffic must never leak into the user's Internet proxy.
@@ -399,34 +505,80 @@ def _log_official_transport(
     sys.stderr.flush()
 
 
+def _set_response_read_timeout(response: Any, timeout: float) -> None:
+    """Restore the long SSE read timeout after the short header deadline."""
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is not None and hasattr(sock, "settimeout"):
+        sock.settimeout(timeout)
+
+
+def _client_disconnected(connection: Any) -> bool:
+    try:
+        readable, _, _ = select.select([connection], [], [], 0)
+        if not readable:
+            return False
+        return connection.recv(1, socket.MSG_PEEK) == b""
+    except (BlockingIOError, InterruptedError):
+        return False
+    except OSError:
+        return True
+
+
 def open_upstream_response(
     route: str,
     target: str,
     body: bytes,
     headers: Dict[str, str],
-    timeout: int = 1800,
+    timeout: float = 1800,
     request_id: str = "",
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Any:
-    """Open an upstream response, retrying only transient official transport setup failures."""
-    delays = OFFICIAL_OPEN_RETRY_DELAYS if route == "openai" else ()
+    """Open upstream with a hard, user-visible official first-byte deadline."""
+    if route != "openai":
+        request = urllib.request.Request(target, data=body, method="POST", headers=headers)
+        return opener_for(route).open(request, timeout=timeout)
+
+    delays = OFFICIAL_OPEN_RETRY_DELAYS
+    deadline = time.monotonic() + OFFICIAL_FIRST_BYTE_DEADLINE
+    last_error: Optional[BaseException] = None
     for attempt in range(len(delays) + 1):
+        if cancelled is not None and cancelled():
+            raise ClientDisconnected("Codex disconnected before the official route opened")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         request = urllib.request.Request(target, data=body, method="POST", headers=headers)
         try:
-            response = opener_for(route).open(request, timeout=timeout)
-            if route == "openai" and attempt:
+            response = opener_for(route).open(
+                request,
+                timeout=max(0.1, min(OFFICIAL_OPEN_ATTEMPT_TIMEOUT, remaining)),
+            )
+            _set_response_read_timeout(response, timeout)
+            if attempt:
                 _log_official_transport("recovered", attempt=attempt + 1, request_id=request_id)
             return response
         except urllib.error.HTTPError:
             raise
         except Exception as exc:
-            if attempt >= len(delays) or not _is_transient_open_error(exc):
-                if route == "openai" and _is_transient_open_error(exc):
-                    _log_official_transport(
-                        "exhausted", attempt=attempt + 1, error=exc, request_id=request_id
-                    )
+            if not _is_transient_open_error(exc):
                 raise
+            last_error = exc
+            if attempt >= len(delays):
+                break
             _log_official_transport("retry", attempt=attempt + 1, error=exc, request_id=request_id)
-            time.sleep(delays[attempt])
+            delay = min(delays[attempt], max(0.0, deadline - time.monotonic()))
+            if delay <= 0:
+                break
+            time.sleep(delay)
+    if last_error is not None:
+        _log_official_transport(
+            "exhausted", attempt=len(delays) + 1, error=last_error, request_id=request_id
+        )
+    raise OfficialRouteUnavailable(
+        f"Official ChatGPT route did not respond within {OFFICIAL_FIRST_BYTE_DEADLINE:.0f}s"
+    ) from last_error
 
 
 def upstream_url(route: str, request_path: str) -> str:
@@ -561,7 +713,8 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
         self.close_connection = True
 
     def do_GET(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
+        parsed_path = urllib.parse.urlparse(self.path)
+        path = parsed_path.path
         if path == "/v1/responses" and self.headers.get("Upgrade", "").lower() == "websocket":
             # Codex's built-in OpenAI provider may optimistically try WS even
             # when the routed catalog disables it.  OpenCodex established the
@@ -589,6 +742,12 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
                 gateway_ok = isinstance(value, dict) and value.get("status") == "ok"
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
+            query = urllib.parse.parse_qs(parsed_path.query)
+            official = (
+                probe_official_route(timeout=4.0, use_cache=False)
+                if query.get("probe") == ["official"]
+                else cached_official_route()
+            )
             self._json(
                 200,
                 {
@@ -599,6 +758,10 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
                     "gateway_reachable": gateway_ok,
                     "gateway_error": error,
                     "official_route": "chatgpt-forward",
+                    "official_route_reachable": bool(official.get("reachable")),
+                    "official_route_http_status": int(official.get("http_status") or 0),
+                    "official_route_latency_ms": int(official.get("latency_ms") or 0),
+                    "official_route_error": str(official.get("error") or ""),
                     "multi_agent_surface": "v2_custom_roles",
                     "compaction": "responses_compact_v1+trigger_v2_ocx1",
                 },
@@ -630,6 +793,7 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
         self._json(404, {"error": {"message": "Not found", "type": "not_found"}})
 
     def do_POST(self) -> None:  # noqa: N802
+        response_started = False
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > MAX_REQUEST_BYTES:
@@ -662,13 +826,20 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
             request_id = "".join(character for character in raw_request_id if character.isalnum() or character in "-_")[:64]
             request_id = request_id or uuid.uuid4().hex[:16]
             with open_upstream_response(
-                route, target, body, headers, timeout=1800, request_id=request_id
+                route,
+                target,
+                body,
+                headers,
+                timeout=1800,
+                request_id=request_id,
+                cancelled=lambda: _client_disconnected(self.connection),
             ) as response:
                 self.send_response(response.status)
                 for name, value in _public_response_headers(response.headers).items():
                     self.send_header(name, value)
                 self.send_header("Connection", "close")
                 self.end_headers()
+                response_started = True
                 relay_upstream_body(response, self.wfile, request_id=request_id)
             self.close_connection = True
         except urllib.error.HTTPError as exc:
@@ -681,9 +852,23 @@ class NativeRouterHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             self.close_connection = True
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ClientDisconnected):
             self.close_connection = True
+        except OfficialRouteUnavailable as exc:
+            self._json(
+                502,
+                {
+                    "error": {
+                        "message": str(exc),
+                        "type": "official_transport_unavailable",
+                        "code": "official_first_byte_timeout",
+                    }
+                },
+            )
         except Exception as exc:
+            if response_started:
+                self.close_connection = True
+                return
             self._json(
                 400,
                 {
@@ -706,6 +891,13 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:
         daemon=True,
     )
     heartbeat_thread.start()
+    official_health_thread = threading.Thread(
+        target=_official_health_loop,
+        args=(heartbeat_stop,),
+        name="pcl-relay-official-health",
+        daemon=True,
+    )
+    official_health_thread.start()
     sys.stderr.write(
         f"{SERVICE_NAME} {SERVICE_VERSION} listening on {host}:{port}; gateway={selected_gateway()}\n"
     )

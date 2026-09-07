@@ -13,10 +13,12 @@ from pcl_codex_bridge.client_config import (
     choose_native_router_port,
     combined_catalog,
     configured_native_router_port,
+    detect_official_proxy,
     install_client_config,
     install_source_tree,
     managed_block,
     migrate_thread_provider_index,
+    native_router_health,
     uninstall_client_config,
 )
 from pcl_codex_bridge.models import AGENTS, model_catalog
@@ -163,6 +165,8 @@ class ClientConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp)
             (source / "pcl_codex_bridge").mkdir()
+            (source / "LICENSE").write_text("license\n", encoding="utf-8")
+            (source / "NOTICE").write_text("notice\n", encoding="utf-8")
             with (
                 mock.patch("pcl_codex_bridge.client_config.INSTALL_ROOT", source),
                 mock.patch("pcl_codex_bridge.client_config.BIN_PATH", source / "bin" / "pcl-codex"),
@@ -170,6 +174,45 @@ class ClientConfigTests(unittest.TestCase):
             ):
                 install_source_tree(source)
             copytree.assert_not_called()
+
+    def test_proxy_detection_accepts_any_subscription_with_real_official_http(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "PCL_RELAY_OFFICIAL_PROXY": "",
+                    "HTTPS_PROXY": "",
+                    "https_proxy": "",
+                },
+                clear=False,
+            ),
+            mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
+            mock.patch(
+                "pcl_codex_bridge.client_config.probe_official_proxy",
+                side_effect=lambda value: value.endswith(":7890"),
+            ) as probe,
+        ):
+            selected = detect_official_proxy()
+        self.assertEqual(selected, "http://127.0.0.1:7890")
+        self.assertGreaterEqual(probe.call_count, 3)
+
+    def test_deep_router_health_explicitly_probes_official_route(self):
+        with (
+            mock.patch(
+                "pcl_codex_bridge.client_config.load_registry",
+                return_value={"native_router_port": 15724},
+            ),
+            mock.patch(
+                "pcl_codex_bridge.client_config.request_json",
+                return_value={
+                    "service": "pcl-relay-native-router",
+                    "official_route_reachable": True,
+                },
+            ) as request,
+        ):
+            result = native_router_health(timeout=10, probe_official=True)
+        self.assertTrue(result["reachable"])
+        self.assertIn("?probe=official", request.call_args.args[0])
 
     def test_install_preserves_official_provider_fields(self):
         with tempfile.TemporaryDirectory() as temp:

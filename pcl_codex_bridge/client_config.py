@@ -224,10 +224,12 @@ def install_source_tree(source_root: Optional[Path] = None) -> Path:
         _make_tree_owner_writable(destination)
     license_source = source_root / "LICENSE"
     notice_source = source_root / "NOTICE"
-    if license_source.exists():
-        shutil.copy2(license_source, INSTALL_ROOT / "LICENSE")
-    if notice_source.exists():
-        shutil.copy2(notice_source, INSTALL_ROOT / "NOTICE")
+    license_target = INSTALL_ROOT / "LICENSE"
+    notice_target = INSTALL_ROOT / "NOTICE"
+    if license_source.exists() and license_source.resolve() != license_target.resolve():
+        shutil.copy2(license_source, license_target)
+    if notice_source.exists() and notice_source.resolve() != notice_target.resolve():
+        shutil.copy2(notice_source, notice_target)
     (INSTALL_ROOT / "VERSION").write_text(__version__ + "\n", encoding="utf-8")
     zstd_source = zstd_library_source()
     if zstd_source is not None:
@@ -706,11 +708,20 @@ def _port_is_bindable(port: int) -> bool:
         candidate.close()
 
 
-def native_router_health(port: Optional[int] = None, timeout: float = 3.0) -> Dict[str, Any]:
+def native_router_health(
+    port: Optional[int] = None,
+    timeout: float = 3.0,
+    *,
+    probe_official: bool = False,
+) -> Dict[str, Any]:
     registry = load_registry()
     selected_port = int(port or registry.get("native_router_port") or NATIVE_ROUTER_DEFAULT_PORT)
     try:
-        payload = request_json(f"http://127.0.0.1:{selected_port}/healthz", timeout=max(1, int(timeout)))
+        suffix = "?probe=official" if probe_official else ""
+        payload = request_json(
+            f"http://127.0.0.1:{selected_port}/healthz{suffix}",
+            timeout=max(1, int(timeout)),
+        )
         if isinstance(payload, dict) and payload.get("service") == NATIVE_ROUTER_SERVICE:
             return {"reachable": True, "port": selected_port, **payload}
         return {"reachable": False, "port": selected_port, "error": "unexpected service identity"}
@@ -743,19 +754,27 @@ def detect_official_proxy() -> str:
     ]
     for port in (17731, 17890, 7890):
         candidates.append(f"http://127.0.0.1:{port}")
+    seen = set()
     for value in candidates:
         value = value.strip()
-        if not value:
+        if not value or value in seen:
             continue
+        seen.add(value)
         parsed = urllib.parse.urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or not parsed.port:
             continue
-        try:
-            with socket.create_connection((parsed.hostname, parsed.port), timeout=0.4):
-                return value
-        except OSError:
-            continue
+        if probe_official_proxy(value):
+            return value
     return ""
+
+
+def probe_official_proxy(value: str, timeout: float = 4.0) -> bool:
+    """Require a real ChatGPT HTTP response, not just an open proxy port."""
+    from .native_router import probe_official_route
+
+    return bool(
+        probe_official_route(value, timeout=timeout, use_cache=False).get("reachable")
+    )
 
 
 def install_native_router_service(port: Optional[int] = None) -> Dict[str, Any]:
@@ -1006,6 +1025,10 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
         "delegation": "native_spawn_agent",
         "multi_agent_surface": "v2_custom_roles",
         "native_router_port": int(load_registry().get("native_router_port") or NATIVE_ROUTER_DEFAULT_PORT),
+        "official_route_reachable": False,
+        "official_route_http_status": 0,
+        "official_route_latency_ms": 0,
+        "official_route_error": "",
         "registry": (Path.home() / ".config" / "pcl-codex-bridge" / "models.json").exists(),
         "unsandboxed_fallback": UNSANDBOXED_MARKER.exists(),
     }
@@ -1043,9 +1066,15 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
         result["native_v2"] = native_v2
         result["native_roles"] = len(managed_roles) == len(selected) and bool(selected)
         result["legacy_delegate_mcp"] = "[mcp_servers.pcl_agents]" in text or "[model_providers.pcl_internal]" in text
-    router = native_router_health(result["native_router_port"])
+    router = native_router_health(
+        result["native_router_port"], timeout=10, probe_official=True
+    )
     result["native_router"] = bool(router.get("reachable"))
     result["native_router_health"] = router
+    result["official_route_reachable"] = bool(router.get("official_route_reachable"))
+    result["official_route_http_status"] = int(router.get("official_route_http_status") or 0)
+    result["official_route_latency_ms"] = int(router.get("official_route_latency_ms") or 0)
+    result["official_route_error"] = str(router.get("official_route_error") or "")
     result["profile"] = result["native_router"]
     try:
         health = request_json(gateway_root(gateway_url).rsplit("/v1", 1)[0] + "/healthz", timeout=10)

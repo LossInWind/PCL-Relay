@@ -34,6 +34,8 @@ ChatGPT Codex 后端       Tailnet 中转站:15722 -> PCL API
 - PCL API 当前未公开原生 `reasoning_effort` 参数。Codex 的 low / medium / high / xhigh 会采用明确标注的提示词兼容映射，请求值、实际映射和降级方式同时写入响应元数据与中转站日志。
 - Responses 的 `max_output_tokens` 同时包含推理与可见输出。PCL Relay 会按推理强度保留最低总预算（high 为 8192、xhigh 为 12288，可通过环境变量调整），避免推理耗尽预算后丢失正文或工具调用。
 - PCL 子 Agent 支持 Codex 原生远程上下文压缩：旧版 `/responses/compact` 与新版 `compaction_trigger` 均由所选 PCL 模型生成检查点摘要，并使用与 OpenCodex / CCSwitchMulti 兼容的 `ocx1` 信封安全续跑；压缩不会退回 GPT，也不会把 PCL Key 发到客户端。
+- 官方 GPT 流在返回响应头前只有 15 秒硬截止时间和最多 3 次尝试；失败会立即显示为可诊断错误，不会让 Codex 静默“正在思考”数分钟。SSE 已开始后的中断只结束当前流，不会再拼接第二个 HTTP 响应。
+- 官方代理通过真实 ChatGPT HTTPS 响应验证，而不是只看 Clash 端口是否打开；因此不绑定订阅名称或节点，只要当前订阅能通过标准 HTTP 代理访问官方端点即可。
 - MCP 只保留模型发现和健康状态，不执行任务，也不再启动外部 `codex exec`。
 
 PCL API Key 默认只保存在所选中转站的 `~/.config/pcl-codex-bridge/api-key`（权限 `600`）。普通 Tailnet 客户端、Codex 配置和子 Agent 上下文均不保存该 Key。
@@ -49,6 +51,8 @@ macOS 的 **PCL Relay.app** 按用户任务收成三个联动页面：
 PCL Relay 作为菜单栏应用运行：关闭完整设置不会退出，右上角图标可直接刷新网络、检测模型、打开门户或进入 Agent 设置。应用使用 macOS 登录项自动启动，不使用 KeepAlive；用户选择“退出应用”后不会在当前登录会话被强行拉起。
 
 菜单栏和完整设置均提供“Codex PCL 子 Agent”总开关。关闭后停止本机回环路由并只移除 PCL Relay 管理的配置、目录和角色，Codex 恢复官方 provider 与原有登录；关闭状态会持久化，App 重启后不会自动重新启用。
+
+菜单栏状态同时检查 PCL 中转站与官方 GPT 实际路由；两者会分别暴露健康结果，避免“中转站正常”掩盖官方代理已经失效。
 
 Embedding、重排序、语音、OCR 和图像模型可以在模型目录中查看，但不会被误注册成代码子 Agent。
 

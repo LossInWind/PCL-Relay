@@ -20,9 +20,9 @@ struct MenuBarPanel: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("PCL Relay")
                         .font(.headline)
-                    Text(model.relayReady ? "中转站在线" : "网络需要检查")
+                    Text(model.networkStatusTitle)
                         .font(.caption)
-                        .foregroundStyle(model.relayReady ? Color.green : Color.orange)
+                        .foregroundStyle(model.networkReady ? Color.green : Color.orange)
                 }
 
                 Spacer()
@@ -32,9 +32,9 @@ struct MenuBarPanel: View {
                         .controlSize(.small)
                 } else {
                     Circle()
-                        .fill(model.relayReady ? Color.green : Color.orange)
+                        .fill(model.networkReady ? Color.green : Color.orange)
                         .frame(width: 9, height: 9)
-                        .shadow(color: (model.relayReady ? Color.green : Color.orange).opacity(0.45), radius: 4)
+                        .shadow(color: (model.networkReady ? Color.green : Color.orange).opacity(0.45), radius: 4)
                 }
             }
 

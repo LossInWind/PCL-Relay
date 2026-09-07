@@ -55,9 +55,9 @@ struct HeaderBar: View {
             .disabled(model.isTogglingIntegration)
 
             StatusPill(
-                title: model.relayReady ? "中转站在线" : "需要检查",
-                active: model.relayReady,
-                symbol: model.relayReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+                title: model.networkStatusTitle,
+                active: model.networkReady,
+                symbol: model.networkReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
             )
             Button {
                 model.refreshAll()

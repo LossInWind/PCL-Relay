@@ -103,6 +103,20 @@ final class AppModel: ObservableObject {
         doctor?.gateway == true && doctor?.tailscale == true
     }
 
+    var officialRouteReady: Bool {
+        doctor?.officialRouteReachable == true
+    }
+
+    var networkReady: Bool {
+        relayReady && officialRouteReady
+    }
+
+    var networkStatusTitle: String {
+        if !relayReady { return "中转站异常" }
+        if !officialRouteReady { return "GPT 链路异常" }
+        return "网络正常"
+    }
+
     var allDiscoveredModels: [DiscoveredModel] {
         (registry?.availableModels?.values.map { $0 } ?? []).sorted {
             if $0.agentEligible != $1.agentEligible { return $0.agentEligible && !$1.agentEligible }

@@ -20,6 +20,10 @@ public struct DoctorStatus: Codable, Equatable, Sendable {
     public let delegation: String?
     public let multiAgentSurface: String?
     public let nativeRouterPort: Int?
+    public let officialRouteReachable: Bool?
+    public let officialRouteHTTPStatus: Int?
+    public let officialRouteLatencyMS: Int?
+    public let officialRouteError: String?
 
     enum CodingKeys: String, CodingKey {
         case gateway, tailscale, codex, profile, catalog, registry, delegation
@@ -35,6 +39,10 @@ public struct DoctorStatus: Codable, Equatable, Sendable {
         case legacyDelegateMCP = "legacy_delegate_mcp"
         case multiAgentSurface = "multi_agent_surface"
         case nativeRouterPort = "native_router_port"
+        case officialRouteReachable = "official_route_reachable"
+        case officialRouteHTTPStatus = "official_route_http_status"
+        case officialRouteLatencyMS = "official_route_latency_ms"
+        case officialRouteError = "official_route_error"
     }
 }
 

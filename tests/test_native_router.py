@@ -30,10 +30,11 @@ class NativeRouterTests(unittest.TestCase):
             )
         self.assertIs(actual, response)
         self.assertEqual(opener.open.call_count, 2)
+        response.fp.raw._sock.settimeout.assert_called_once_with(1800)
         sleep.assert_called_once_with(native_router.OFFICIAL_OPEN_RETRY_DELAYS[0])
         self.assertEqual(log_transport.call_count, 2)
 
-    def test_official_open_keeps_turn_alive_across_node_switch_window(self):
+    def test_official_open_has_bounded_retry_window(self):
         response = mock.MagicMock()
         opener = mock.MagicMock()
         failure = urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof"))
@@ -51,6 +52,75 @@ class NativeRouterTests(unittest.TestCase):
             [call.args[0] for call in sleep.call_args_list],
             list(native_router.OFFICIAL_OPEN_RETRY_DELAYS),
         )
+        self.assertLessEqual(sum(native_router.OFFICIAL_OPEN_RETRY_DELAYS), 2.0)
+        self.assertTrue(
+            all(
+                call.kwargs["timeout"] <= native_router.OFFICIAL_OPEN_ATTEMPT_TIMEOUT
+                for call in opener.open.call_args_list
+            )
+        )
+
+    def test_official_open_exhaustion_is_visible_and_bounded(self):
+        opener = mock.MagicMock()
+        failure = urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof"))
+        opener.open.side_effect = failure
+        with (
+            mock.patch.object(native_router, "opener_for", return_value=opener),
+            mock.patch.object(native_router.time, "sleep") as sleep,
+            self.assertRaises(native_router.OfficialRouteUnavailable),
+        ):
+            native_router.open_upstream_response(
+                "openai", "https://chatgpt.com/backend-api/codex/responses", b"{}", {}
+            )
+        self.assertEqual(opener.open.call_count, 3)
+        self.assertEqual(sum(call.args[0] for call in sleep.call_args_list), 1.5)
+
+    def test_official_open_never_exceeds_first_byte_deadline(self):
+        clock = [100.0]
+        failure = urllib.error.URLError(ssl.SSLEOFError(8, "unexpected eof"))
+        opener = mock.MagicMock()
+
+        def fail_after_timeout(_request, *, timeout):
+            clock[0] += timeout
+            raise failure
+
+        def advance_sleep(delay):
+            clock[0] += delay
+
+        opener.open.side_effect = fail_after_timeout
+        with (
+            mock.patch.object(native_router, "opener_for", return_value=opener),
+            mock.patch.object(native_router.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(native_router.time, "sleep", side_effect=advance_sleep),
+            self.assertRaises(native_router.OfficialRouteUnavailable),
+        ):
+            native_router.open_upstream_response(
+                "openai", "https://chatgpt.com/backend-api/codex/responses", b"{}", {}
+            )
+        self.assertLessEqual(
+            clock[0] - 100.0,
+            native_router.OFFICIAL_FIRST_BYTE_DEADLINE,
+        )
+
+    def test_official_open_stops_retrying_when_client_disconnects(self):
+        opener = mock.MagicMock()
+        opener.open.side_effect = urllib.error.URLError(
+            ssl.SSLEOFError(8, "unexpected eof")
+        )
+        cancelled = mock.MagicMock(side_effect=[False, True])
+        with (
+            mock.patch.object(native_router, "opener_for", return_value=opener),
+            mock.patch.object(native_router.time, "sleep"),
+            self.assertRaises(native_router.ClientDisconnected),
+        ):
+            native_router.open_upstream_response(
+                "openai",
+                "https://chatgpt.com/backend-api/codex/responses",
+                b"{}",
+                {},
+                cancelled=cancelled,
+            )
+        self.assertEqual(opener.open.call_count, 1)
 
     def test_official_open_does_not_retry_http_errors(self):
         error = urllib.error.HTTPError("https://example.test", 429, "limited", {}, None)
@@ -123,6 +193,54 @@ class NativeRouterTests(unittest.TestCase):
             native_router.relay_upstream_body(BrokenResponse(), BytesIO(), request_id="req-123")
         log_transport.assert_called_once()
         self.assertEqual(log_transport.call_args.kwargs["request_id"], "req-123")
+
+    def test_official_health_requires_real_http_response_through_proxy(self):
+        opener = mock.MagicMock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            "https://chatgpt.com/backend-api/codex/models",
+            401,
+            "unauthorized",
+            {},
+            BytesIO(),
+        )
+        with (
+            mock.patch.object(native_router.urllib.request, "build_opener", return_value=opener),
+            native_router._official_health_lock,
+        ):
+            native_router._official_health_cache.clear()
+        with mock.patch.object(
+            native_router.urllib.request, "build_opener", return_value=opener
+        ):
+            status = native_router.probe_official_route(
+                "http://127.0.0.1:7890", use_cache=False
+            )
+        self.assertTrue(status["reachable"])
+        self.assertEqual(status["http_status"], 401)
+
+    def test_cached_official_health_does_not_make_network_request(self):
+        with native_router._official_health_lock:
+            native_router._official_health_cache.clear()
+            native_router._official_health_cache.update(
+                {
+                    "key": "http://127.0.0.1:7890",
+                    "checked_at": 1.0,
+                    "reachable": True,
+                    "proxy": "http://127.0.0.1:7890",
+                    "http_status": 401,
+                    "latency_ms": 42,
+                    "error": "",
+                }
+            )
+        with (
+            mock.patch.object(
+                native_router, "official_proxy_url", return_value="http://127.0.0.1:7890"
+            ),
+            mock.patch.object(native_router.urllib.request, "build_opener") as opener,
+        ):
+            status = native_router.cached_official_route()
+        self.assertTrue(status["reachable"])
+        self.assertEqual(status["http_status"], 401)
+        opener.assert_not_called()
 
     def test_topology_heartbeat_reports_endpoint_measurements(self):
         managed = "# >>> pcl-codex-bridge managed block >>>\n# >>> pcl-relay native router root >>>\n[features.multi_agent_v2]\n"
@@ -337,6 +455,82 @@ class NativeRouterTests(unittest.TestCase):
             body = json.loads(response.read())
             self.assertEqual(response.status, 426)
             self.assertEqual(body["error"]["code"], "responses_websocket_not_supported")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_official_first_byte_failure_returns_visible_502(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), native_router.NativeRouterHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with mock.patch.object(
+                native_router,
+                "open_upstream_response",
+                side_effect=native_router.OfficialRouteUnavailable("official route unavailable"),
+            ):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=3
+                )
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    body=json.dumps({"model": "gpt-5.6-sol", "input": []}),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                body = json.loads(response.read())
+            self.assertEqual(response.status, 502)
+            self.assertEqual(body["error"]["code"], "official_first_byte_timeout")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_started_sse_interruption_does_not_write_second_http_response(self):
+        class InterruptedResponse:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __init__(self):
+                self.sent = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def readline(self):
+                if not self.sent:
+                    self.sent = True
+                    return b'data: {"type":"response.created"}\n'
+                raise ssl.SSLEOFError(8, "unexpected eof")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), native_router.NativeRouterHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with mock.patch.object(
+                native_router,
+                "open_upstream_response",
+                return_value=InterruptedResponse(),
+            ):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=3
+                )
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    body=json.dumps({"model": "gpt-5.6-sol", "input": []}),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                body = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertIn(b"response.created", body)
+            self.assertNotIn(b"HTTP/1.1 400", body)
         finally:
             server.shutdown()
             server.server_close()

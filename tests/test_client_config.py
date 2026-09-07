@@ -16,6 +16,7 @@ from pcl_codex_bridge.client_config import (
     install_client_config,
     install_source_tree,
     managed_block,
+    migrate_thread_provider_index,
     uninstall_client_config,
 )
 from pcl_codex_bridge.models import AGENTS, model_catalog
@@ -23,6 +24,62 @@ from pcl_codex_bridge.relay_discovery import find_tailscale
 
 
 class ClientConfigTests(unittest.TestCase):
+    def test_provider_index_migration_backs_up_and_preserves_other_rows(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            database = home / "state_5.sqlite"
+            connection = sqlite3.connect(database)
+            rollouts = home / "sessions"
+            rollouts.mkdir()
+            first = rollouts / "old-1.jsonl"
+            second = rollouts / "old-2.jsonl"
+            other = rollouts / "other.jsonl"
+            first.write_text('{"type":"session_meta","payload":{"model_provider":"openai"}}\n{"type":"event","value":1}\n')
+            second.write_text(
+                '{"type":"session_meta","payload":{"model_provider": "openai"}}\n'
+                '{"type":"event","value":"\\\"model_provider\\\":\\\"openai\\\""}\n'
+                '{"type":"session_meta","payload":{"model_provider":"openai"}}\n'
+            )
+            other.write_text('{"type":"session_meta","payload":{"model_provider":"custom"}}\n')
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, model_provider TEXT NOT NULL)"
+            )
+            connection.executemany(
+                "INSERT INTO threads VALUES (?, ?, ?)",
+                [
+                    ("old-1", str(first), "openai"),
+                    # A previous database-only repair must not hide this rollout
+                    # from the durable session metadata migration.
+                    ("old-2", str(second), "pcl_relay_official"),
+                    ("other", str(other), "custom"),
+                ],
+            )
+            connection.commit()
+            connection.close()
+
+            result = migrate_thread_provider_index(home, "openai", "pcl_relay_official")
+
+            self.assertEqual(result["migrated_threads"], 2)
+            self.assertEqual(result["migrated_rollouts"], 2)
+            self.assertTrue(Path(result["backup"]).exists())
+            self.assertTrue(Path(result["journal"]).exists())
+            connection = sqlite3.connect(database)
+            rows = connection.execute("SELECT id, model_provider FROM threads ORDER BY id").fetchall()
+            connection.close()
+            self.assertEqual(
+                rows,
+                [("old-1", "pcl_relay_official"), ("old-2", "pcl_relay_official"), ("other", "custom")],
+            )
+            self.assertIn('"model_provider":"pcl_relay_official"', first.read_text())
+            self.assertEqual(first.read_text().splitlines()[1], '{"type":"event","value":1}')
+            second_lines = second.read_text().splitlines()
+            self.assertIn('"model_provider":"pcl_relay_official"', second_lines[0])
+            self.assertEqual(second_lines[1], '{"type":"event","value":"\\\"model_provider\\\":\\\"openai\\\""}')
+            self.assertIn('"model_provider":"pcl_relay_official"', second_lines[2])
+
     def test_configured_router_port_prefers_codex_source_of_truth(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"

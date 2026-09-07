@@ -6,6 +6,7 @@ import plistlib
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -47,6 +48,147 @@ NATIVE_STATE_ROOT = Path.home() / ".local" / "state" / "pcl-codex-bridge"
 NATIVE_LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "cn.haichen.pcl-relay-router.plist"
 NATIVE_SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / "pcl-relay-router.service"
 AGENT_ROLE_MARKER = "# >>> pcl-relay managed native agent role v2 >>>"
+
+
+def migrate_thread_provider_index(
+    home: Path,
+    source_provider: str,
+    target_provider: str,
+) -> Dict[str, Any]:
+    """Keep existing Codex history visible after changing the root provider.
+
+    Codex's VS Code history query filters by the current model provider and
+    may rebuild the database value from each rollout's ``session_meta``. Both
+    sources therefore have to move together. A rollout can contain additional
+    ``session_meta`` records after compaction, so every provider token in those
+    metadata records is replaced; conversation events remain byte-for-byte
+    unchanged. A migration journal and SQLite online backup are written first.
+    """
+    result: Dict[str, Any] = {
+        "database": str(home / "state_5.sqlite"),
+        "source_provider": source_provider,
+        "target_provider": target_provider,
+        "migrated_threads": 0,
+        "migrated_rollouts": 0,
+        "backup": "",
+        "journal": "",
+    }
+    if not source_provider or source_provider == target_provider:
+        return result
+
+    database = home / "state_5.sqlite"
+    if not database.exists():
+        return result
+
+    connection = sqlite3.connect(database, timeout=10)
+    try:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'threads'"
+        ).fetchone()
+        if table is None:
+            return result
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(threads)")}
+        if "rollout_path" not in columns:
+            return result
+        rows = connection.execute(
+            "SELECT id, rollout_path, model_provider FROM threads"
+        ).fetchall()
+        if not rows:
+            return result
+
+        source_token = re.compile(
+            rb'"model_provider"\s*:\s*"' + re.escape(source_provider.encode("utf-8")) + rb'"'
+        )
+        target_token = re.compile(
+            rb'"model_provider"\s*:\s*"' + re.escape(target_provider.encode("utf-8")) + rb'"'
+        )
+        session_meta_token = re.compile(rb'"type"\s*:\s*"session_meta"')
+        plans: List[tuple[str, Path, bool]] = []
+        for thread_id, rollout_value, database_provider in rows:
+            rollout = Path(rollout_value)
+            if not rollout.is_file():
+                continue
+            has_source_metadata = False
+            has_target_metadata = False
+            with rollout.open("rb") as source:
+                for line in source:
+                    if not session_meta_token.search(line):
+                        continue
+                    has_source_metadata = has_source_metadata or bool(source_token.search(line))
+                    has_target_metadata = has_target_metadata or bool(target_token.search(line))
+            if has_source_metadata:
+                plans.append((thread_id, rollout, True))
+            elif database_provider == source_provider and has_target_metadata:
+                plans.append((thread_id, rollout, False))
+        if not plans:
+            return result
+
+        stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
+        backup_path = database.with_name(database.name + f".backup-provider-{stamp}")
+        backup_connection = sqlite3.connect(backup_path)
+        try:
+            connection.backup(backup_connection)
+        finally:
+            backup_connection.close()
+        os.chmod(backup_path, database.stat().st_mode & 0o777)
+
+        journal_dir = home / "provider_migrations"
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        journal_path = journal_dir / f"provider-{stamp}.json"
+        journal = {
+            "source_provider": source_provider,
+            "target_provider": target_provider,
+            "database": str(database),
+            "database_backup": str(backup_path),
+            "rollouts": [str(path) for _, path, rewrite in plans if rewrite],
+            "thread_ids": [thread_id for thread_id, _, _ in plans],
+        }
+        _atomic_write_text(journal_path, json.dumps(journal, ensure_ascii=False, indent=2) + "\n")
+
+        replacement = b'"model_provider":' + json.dumps(target_provider).encode("utf-8")
+        migrated_ids: List[str] = []
+        migrated_rollouts = 0
+        for thread_id, rollout, rewrite in plans:
+            if not rewrite:
+                migrated_ids.append(thread_id)
+                continue
+            with rollout.open("rb") as source:
+                temporary = rollout.with_name(rollout.name + f".provider-migration-{os.getpid()}.tmp")
+                try:
+                    with temporary.open("wb") as destination:
+                        replacements = 0
+                        for line in source:
+                            if session_meta_token.search(line):
+                                line, changed = source_token.subn(replacement, line)
+                                replacements += changed
+                            destination.write(line)
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                    if replacements == 0:
+                        temporary.unlink(missing_ok=True)
+                        continue
+                    os.chmod(temporary, rollout.stat().st_mode & 0o777)
+                    os.replace(temporary, rollout)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            migrated_ids.append(thread_id)
+            migrated_rollouts += 1
+
+        if migrated_ids:
+            with connection:
+                connection.executemany(
+                    "UPDATE threads SET model_provider = ? WHERE id = ?",
+                    [(target_provider, thread_id) for thread_id in migrated_ids],
+                )
+        result["migrated_threads"] = len(migrated_ids)
+        result["migrated_rollouts"] = migrated_rollouts
+        result["backup"] = str(backup_path)
+        result["journal"] = str(journal_path)
+        return result
+    finally:
+        connection.close()
+
+
 def _make_tree_owner_writable(root: Path) -> None:
     """Normalize files copied from the signed, read-only macOS app bundle."""
     if not root.exists():
@@ -488,6 +630,8 @@ def install_client_config(
     if updated != original:
         _atomic_write_text(config, updated)
 
+    history_migration = migrate_thread_provider_index(home, "openai", "pcl_relay_official")
+
     # Remove files from the former out-of-process/MCP delegation design after
     # the native catalog has been written successfully.
     for legacy in (home / "pcl-agent.config.toml", home / "pcl-models.json"):
@@ -505,6 +649,7 @@ def install_client_config(
         "previous_router_port": previous_port,
         "router_port_changed": previous_port is not None and previous_port != port,
         "codex_reload_required": previous_port is None or previous_port != port,
+        "history_migration": history_migration,
     }
 
 
@@ -540,7 +685,13 @@ def uninstall_client_config() -> Dict[str, Any]:
             if managed:
                 path.unlink()
                 removed.append(str(path))
-    return {"config_changed": changed, "backup": str(backup_path or ""), "removed": removed}
+    history_migration = migrate_thread_provider_index(home, "pcl_relay_official", "openai")
+    return {
+        "config_changed": changed,
+        "backup": str(backup_path or ""),
+        "removed": removed,
+        "history_migration": history_migration,
+    }
 
 
 def _port_is_bindable(port: int) -> bool:

@@ -9,6 +9,15 @@ struct LoginItemStatus {
 struct LoginItemManager {
     private let fallbackLabel = "cn.haichen.pcl-relay-login"
 
+    func status() -> LoginItemStatus {
+        if SMAppService.mainApp.status == .enabled { return enabledStatus }
+        if SMAppService.mainApp.status == .requiresApproval {
+            return .init(enabled: false, message: "登录启动需要在系统设置中允许")
+        }
+        if launchctl(["print", "gui/\(getuid())/\(fallbackLabel)"]) == 0 { return enabledStatus }
+        return .init(enabled: false, message: "未启用登录启动；可在高级设置启用")
+    }
+
     func configure(appURL: URL = Bundle.main.bundleURL) -> LoginItemStatus {
         let service = SMAppService.mainApp
         if service.status == .requiresApproval {

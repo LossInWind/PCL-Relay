@@ -23,6 +23,21 @@ public struct RoutingDevice: Identifiable, Equatable, Sendable {
     public var targets: [DeploymentTarget]
     public var peers: [RelaySyncPeer]
     public var runtime: RoutingRuntime? { targets.compactMap(\.runtime).first ?? peers.compactMap(\.runtime).first }
+    public var canReceiveUpdateOffer: Bool { !isLocal && !peers.isEmpty }
+    public var updateReason: String {
+        if isLocal { return "本机应用单独更新" }
+        if canReceiveUpdateOffer {
+            return online == true ? "可接收升级通知；运行版本仍需验证" : "已登记同步；离线时待上线领取，不计完成"
+        }
+        if !targets.isEmpty { return "尚未建立同步关系；先安装 / 接入登记设备" }
+        return "缺少升级通道"
+    }
+    public var installationTitle: String {
+        if isLocal { return "应用运行中" }
+        if targets.contains(where: { $0.installed == true }) { return "已安装" }
+        if targets.contains(where: { $0.installed == false }) { return "尚未安装" }
+        return "安装状态未知"
+    }
 
     public var needsRestart: Bool {
         guard let installedVersion, !installedVersion.isEmpty,

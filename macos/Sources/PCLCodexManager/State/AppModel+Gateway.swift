@@ -63,14 +63,17 @@ extension AppModel {
     }
 
     func refreshPortalStatus(showBanner: Bool) async {
-        guard !isCheckingPortal else { return }
+        if let running = checkTasks["portal"] { await running.value; return }
         isCheckingPortal = true
         defer { isCheckingPortal = false }
-        do {
+        await check("portal") { [self] in
             let result = try await runCLI(["portal", "status"])
             guard result.exitCode == 0 else { throw commandError(result) }
             let decoded = try BridgeDecode.value(PortalStatus.self, from: result.stdout)
             portalStatus = decoded
+            if !decoded.available {
+                throw NSError(domain: "PCLRelay", code: 1, userInfo: [NSLocalizedDescriptionKey: decoded.error])
+            }
             if showBanner {
                 show(
                     decoded.available
@@ -79,23 +82,27 @@ extension AppModel {
                     decoded.available ? .success : .error
                 )
             }
-        } catch {
-            if showBanner { show("门户检测失败：\(error.localizedDescription)", .error) }
         }
+        if showBanner, let error = checks["portal"]?.error { show("门户检测失败：\(error)", .error) }
     }
 
     func openPortal(path: String) {
         guard !isOpeningPortal else { return }
         isOpeningPortal = true
+        lastPortalPath = path
+        portalOpenFailed = false
+        portalOpenMessage = "正在打开专用浏览器…"
         Task {
             defer { isOpeningPortal = false }
             do {
                 let result = try await runCLI(["portal", "open", "--path", path])
                 guard result.exitCode == 0 else { throw commandError(result) }
                 let decoded = try BridgeDecode.value(PortalStatus.self, from: result.stdout)
-                portalStatus = decoded
+                portalOpenMessage = "已交给 \(decoded.browser ?? "浏览器") 打开；页面登录状态请在浏览器中确认"
                 show("已通过 \(decoded.browser ?? "浏览器") 打开 PCL 内网页面", .success)
             } catch {
+                portalOpenFailed = true
+                portalOpenMessage = "打开失败：\(error.localizedDescription)"
                 show("打开失败：\(error.localizedDescription)", .error)
             }
         }

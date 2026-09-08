@@ -9,7 +9,21 @@ final class AppModel: ObservableObject {
     @Published var registry: ModelRegistry?
     @Published var serverStatus: RelayServerStatus?
     @Published var portalStatus: PortalStatus?
-    @Published var selectedAgents = Set(AgentDefinition.all.map(\.id))
+    @Published var agentSelection = AgentSelectionState(Set(AgentDefinition.all.map(\.id)))
+    var selectedAgents: Set<String> {
+        get { agentSelection.displayed }
+        set { agentSelection.adopt(newValue, revision: agentSelection.revision) }
+    }
+    @Published var agentSaveMessage = "尚未修改"
+    @Published var isInstallingIntegration = false
+    @Published var showDetectionConfirmation = false
+    @Published var checks: [String: CheckEvidence] = [:]
+    @Published var portalOpenMessage = ""
+    @Published var portalOpenFailed = false
+    var lastPortalPath = "/"
+    var checkTasks: [String: Task<Void, Never>] = [:]
+    // Injected only in isolated tests; production always uses the bundled CLI.
+    var commandOverride: (([String]) async throws -> CommandResult)?
     @Published var remoteServiceActive = false
     @Published var remoteStatusText = "尚未检查"
     @Published var gatewayLogs = ""
@@ -83,13 +97,17 @@ final class AppModel: ObservableObject {
     }
 
     var routeReady: Bool {
-        doctor?.gateway == true && integrationActive
+        checks["connection"]?.phase == .succeeded && checks["integration"]?.phase == .succeeded
+            && doctor?.gateway == true && integrationActive
     }
 
     var routeStatusTitle: String {
-        if doctor?.gateway != true { return "PCL endpoint 不可用" }
+        if checks["connection"]?.phase == .failed { return "连接检查失败" }
+        if checks["connection"]?.phase != .succeeded { return "连接待确认" }
+        if doctor?.gateway != true { return "PCL 接入点不可达" }
+        if checks["integration"]?.phase != .succeeded { return "Codex 接入待确认" }
         if !integrationActive { return "Codex 集成待启用" }
-        return "模型路由正常"
+        return "接入点可达 · 非模型实测"
     }
 
     var gatewayDisplayName: String {
@@ -138,7 +156,7 @@ final class AppModel: ObservableObject {
     func start() {
         guard !didStart else { return }
         didStart = true
-        let loginItem = loginItemManager.configure()
+        let loginItem = loginItemManager.status()
         launchAtLoginEnabled = loginItem.enabled
         launchAtLoginStatusText = loginItem.message
         refreshAll()
@@ -149,37 +167,13 @@ final class AppModel: ObservableObject {
         isRefreshing = true
         Task {
             defer { isRefreshing = false }
-            do {
-                let doctorResult = try await runCLI(["doctor"])
-                guard doctorResult.exitCode == 0 else { throw commandError(doctorResult) }
-                doctor = try BridgeDecode.value(DoctorStatus.self, from: doctorResult.stdout)
-
-                let integrationResult = try await runCLI(["integration", "status"])
-                if integrationResult.exitCode == 0,
-                   let data = integrationResult.stdout.data(using: .utf8),
-                   let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let enabled = payload["enabled"] as? Bool {
-                    integrationEnabled = enabled
-                    integrationActive = payload["active"] as? Bool ?? false
-                }
-
-                let registryResult = try await runCLI(["models", "show"])
-                if registryResult.exitCode == 0 {
-                    let decoded = try BridgeDecode.value(ModelRegistry.self, from: registryResult.stdout)
-                    registry = decoded
-                    selectedAgents = Set(decoded.selectedAgents ?? AgentDefinition.all.map(\.id))
-                }
-                Task { await refreshRoutes(showBanner: false) }
-                Task { await refreshRelaySync(showBanner: false) }
-                Task { await refreshDeploymentTargets(showBanner: false) }
-                remoteServiceActive = doctor?.gateway == true
-                remoteStatusText = remoteServiceActive ? "PCL gateway endpoint 已响应" : (doctor?.gatewayError ?? "PCL gateway endpoint 不可达")
-                Task { await refreshRemoteStatus() }
-                Task { await refreshPortalStatus(showBanner: false) }
-                Task { await checkAppUpdate(showBanner: false) }
-            } catch {
-                show("刷新失败：\(error.localizedDescription)", .error)
-            }
+            async let connection: Void = readConnection()
+            async let integration: Void = readIntegration()
+            async let models: Void = readModelRegistry()
+            async let routing: Void = checkRoutingDashboard()
+            async let portal: Void = refreshPortalStatus(showBanner: false)
+            async let updates: Void = checkAppUpdate(showBanner: false)
+            _ = await (connection, integration, models, routing, portal, updates)
         }
     }
 
@@ -238,6 +232,7 @@ final class AppModel: ObservableObject {
     }
 
     func runCLI(_ arguments: [String], id: UUID = UUID()) async throws -> CommandResult {
+        if let commandOverride { return try await commandOverride(arguments) }
         guard let cliURL else {
             throw NSError(domain: "PCLCodexManager", code: 2, userInfo: [NSLocalizedDescriptionKey: "App 内未找到 pcl-codex 客户端，请重新安装 PCL Relay.app"])
         }

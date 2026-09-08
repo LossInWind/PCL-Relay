@@ -22,6 +22,11 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "AppModelTests",
+            dependencies: ["PCLCodexManager", "BridgeCore"],
+            path: "macos/Tests/AppModelTests"
+        ),
+        .testTarget(
             name: "BridgeCoreTests",
             dependencies: ["BridgeCore"],
             path: "macos/Tests/BridgeCoreTests"

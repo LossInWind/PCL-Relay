@@ -2,6 +2,16 @@ import XCTest
 @testable import BridgeCore
 
 final class RoutingSnapshotTests: XCTestCase {
+    func testInstalledRegistrationIsNotAnUpdatePeer() throws {
+        let devices = rows(try [target("a"), target("b"), target("c")])
+        XCTAssertEqual(devices.count, 4)
+        XCTAssertEqual(devices.filter(\.canReceiveUpdateOffer).count, 0)
+        XCTAssertTrue(devices[1].updateReason.contains("同步关系"))
+    }
+    func testUpdateCountsUseUniqueDevicesNotAliasCount() throws {
+        let devices = rows(try [target("a", node: "n")], try [peer("p", node: "n"), peer("q", node: "n")])
+        XCTAssertEqual(devices.filter(\.canReceiveUpdateOffer).count, 1)
+    }
     func testEndpointEvidenceNeverCrossesPathsOrHosts() {
         XCTAssertTrue(RoutingSnapshot.sameEndpoint("http://RELAY:15722/v1/", "http://relay:15722/v1"))
         XCTAssertFalse(RoutingSnapshot.sameEndpoint("http://relay:15722/v1", "http://relay:15722/v2"))

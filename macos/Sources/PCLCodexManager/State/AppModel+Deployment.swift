@@ -4,19 +4,16 @@ import Foundation
 @MainActor
 extension AppModel {
     func refreshDeploymentTargets(showBanner: Bool = true) async {
-        guard !isRefreshingDeploymentTargets else { return }
+        if let running = checkTasks["devices"] { await running.value; return }
         isRefreshingDeploymentTargets = true
         defer { isRefreshingDeploymentTargets = false }
-        do {
+        await check("devices") { [self] in
             let result = try await runCLI(["deploy", "status", "--probe"])
             guard result.exitCode == 0 else { throw commandError(result) }
             deploymentTargets = try BridgeDecode.value(DeploymentTargetCatalog.self, from: result.stdout)
             deviceChecks = [:]
-            if showBanner { show("已检查明确登记的部署节点", .success) }
-        } catch {
-            routingCheckError = "部分设备未能刷新；保留上次结果"
-            if showBanner { show("检查部署节点失败：\(error.localizedDescription)", .error) }
         }
+        if showBanner { show(checks["devices"]?.summary ?? "尚未检查", checks["devices"]?.phase == .succeeded ? .info : .error) }
     }
 
     func addDeploymentTarget(name: String, sshTarget: String, controlURL: String) async -> Bool {

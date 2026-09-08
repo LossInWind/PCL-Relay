@@ -83,6 +83,7 @@ cp "$ROOT/.build/release/PCLCodexManager" "$STAGING/Contents/MacOS/PCLCodexManag
 cp "$ROOT/macos/Info.plist" "$STAGING/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$STAGING/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$STAGING/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :PCLBuildCommit string $(git describe --always --dirty)" "$STAGING/Contents/Info.plist"
 cp "$PYTHON_ROOT/bin/python3.12" "$STAGING/Contents/Resources/bridge/python/bin/python3.12"
 ln -s python3.12 "$STAGING/Contents/Resources/bridge/python/bin/python3"
 cp "$PYTHON_ROOT/lib/libpython3.12.dylib" "$STAGING/Contents/Resources/bridge/python/lib/libpython3.12.dylib"

@@ -6,7 +6,7 @@ struct PortalView: View {
 
     private var available: Bool { model.portalStatus?.available == true }
     private var relayName: String {
-        shortDeviceName(model.currentRelay?.nodeName ?? model.relayNodeName)
+        model.gatewayDisplayName
     }
 
     var body: some View {
@@ -25,7 +25,7 @@ struct PortalView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         Text("PCL 内网页面")
                             .font(.system(size: 22, weight: .semibold, design: .rounded))
-                        Text(available ? "已验证可通过当前中转站访问" : "通过 Tailnet 中转打开 PCL API 广场")
+                        Text(available ? "已验证可通过当前 gateway 访问" : "通过已配置 gateway 打开 PCL API 广场")
                             .font(.subheadline.weight(.medium))
                         Text("登录、查看用量和管理 API Key 都在 PCL 官方网页中完成。")
                             .font(.caption)
@@ -102,8 +102,6 @@ struct PortalView: View {
                     HStack(spacing: 10) {
                         PortalRouteNode(symbol: "laptopcomputer", title: "专用浏览器", detail: "当前 Mac")
                         FlowArrow()
-                        PortalRouteNode(symbol: "lock.shield.fill", title: "Tailscale", detail: "个人 Tailnet")
-                        FlowArrow()
                         PortalRouteNode(symbol: "server.rack", title: relayName, detail: "受限转发")
                         FlowArrow()
                         PortalRouteNode(symbol: "globe.asia.australia.fill", title: "PCL 门户", detail: "llmapi.pcl.ac.cn")
@@ -115,6 +113,7 @@ struct PortalView: View {
                         Label("使用独立浏览器资料保存 PCL 登录状态，不读取你的日常浏览器 Cookie。", systemImage: "person.crop.circle.badge.checkmark")
                         Label("中转站只允许 pcl.ac.cn 域名，不能用于访问其他网站。", systemImage: "checkmark.shield.fill")
                         Label("应用不会显示、下载或记录现有 API Key。", systemImage: "eye.slash.fill")
+                        Label("底层网络由外部基础设施提供，本应用不读取或修改其状态。", systemImage: "network.badge.shield.half.filled")
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)

@@ -20,34 +20,34 @@ struct MenuBarPanel: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("PCL Relay")
                         .font(.headline)
-                    Text(model.networkStatusTitle)
+                    Text(model.routeStatusTitle)
                         .font(.caption)
-                        .foregroundStyle(model.networkReady ? Color.green : Color.orange)
+                        .foregroundStyle(model.routeReady ? Color.green : Color.orange)
                 }
 
                 Spacer()
 
-                if model.isRefreshing || model.isDiscoveringNodes {
+                if model.isRefreshing {
                     ProgressView()
                         .controlSize(.small)
                 } else {
                     Circle()
-                        .fill(model.networkReady ? Color.green : Color.orange)
+                        .fill(model.routeReady ? Color.green : Color.orange)
                         .frame(width: 9, height: 9)
-                        .shadow(color: (model.networkReady ? Color.green : Color.orange).opacity(0.45), radius: 4)
+                        .shadow(color: (model.routeReady ? Color.green : Color.orange).opacity(0.45), radius: 4)
                 }
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Label("当前中转站", systemImage: "server.rack")
+                Label("PCL gateway endpoint", systemImage: "server.rack")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
-                Text(shortDeviceName(model.currentRelay?.nodeName ?? model.relayNodeName))
+                Text(model.gatewayDisplayName)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
 
                 HStack(spacing: 8) {
-                    compactMetric(value: "\(model.tailnetNodes.filter(\.online).count)", label: "在线设备")
+                    compactMetric(value: model.doctor?.gateway == true ? "可用" : "待检查", label: "PCL endpoint")
                     compactMetric(value: "\(model.readyAgentCount)", label: "可用模型")
                     compactMetric(value: model.codexIntegrationReady ? "已接入" : "待检查", label: "Codex")
                 }
@@ -126,7 +126,7 @@ struct MenuBarPanel: View {
             }
 
             Button {
-                openFullSettings(.network)
+                openFullSettings(.routing)
             } label: {
                 Label("打开完整设置", systemImage: "macwindow")
                     .frame(maxWidth: .infinity)
@@ -137,7 +137,7 @@ struct MenuBarPanel: View {
             HStack {
                 if let update = model.releaseUpdate, update.updateAvailable {
                     Button("发现版本 \(update.latestVersion)") {
-                        openFullSettings(.network)
+                        openFullSettings(.routing)
                     }
                     .buttonStyle(.link)
                 }

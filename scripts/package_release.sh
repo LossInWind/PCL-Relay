@@ -6,12 +6,10 @@ DIST="$ROOT/dist"
 APP="$ROOT/.build/release-package/PCL Relay.app"
 ARCHIVE="$DIST/PCL-Relay-macOS.zip"
 CHECKSUM="$ARCHIVE.sha256"
-CLIENT_ARCHIVE="$DIST/PCL-Relay-client.tar.gz"
-CLIENT_CHECKSUM="$CLIENT_ARCHIVE.sha256"
 VERSION="$(tr -d '[:space:]' < "$ROOT/pcl_codex_bridge/VERSION")"
 
 mkdir -p "$DIST" "$(dirname "$APP")"
-rm -f "$ARCHIVE" "$CHECKSUM" "$CLIENT_ARCHIVE" "$CLIENT_CHECKSUM"
+rm -f "$ARCHIVE" "$CHECKSUM"
 
 "$ROOT/scripts/build_macos_app.sh" "$APP"
 /usr/bin/codesign --verify --deep --strict "$APP"
@@ -21,19 +19,12 @@ if [[ "$APP_VERSION" != "$VERSION" ]]; then
   exit 1
 fi
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
-COPYFILE_DISABLE=1 /usr/bin/tar \
-  --exclude='__pycache__' \
-  --exclude='*.py[co]' \
-  -czf "$CLIENT_ARCHIVE" -C "$ROOT" pcl_codex_bridge LICENSE NOTICE
-
 (
   cd "$DIST"
   /usr/bin/shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$CHECKSUM")"
-  /usr/bin/shasum -a 256 "$(basename "$CLIENT_ARCHIVE")" > "$(basename "$CLIENT_CHECKSUM")"
 )
 
 echo "PCL Relay $VERSION"
 echo "$ARCHIVE"
 echo "$CHECKSUM"
-echo "$CLIENT_ARCHIVE"
-echo "$CLIENT_CHECKSUM"
+echo "Linux bundles are built on their target architecture with scripts/build_linux_bundle.sh"

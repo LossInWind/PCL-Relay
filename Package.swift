@@ -13,7 +13,13 @@ let package = Package(
         .executableTarget(
             name: "PCLCodexManager",
             dependencies: ["BridgeCore"],
-            path: "macos/Sources/PCLCodexManager"
+            path: "macos/Sources/PCLCodexManager",
+            exclude: [
+                "State/AppModel+Topology.swift",
+                "Views/DeviceManagementComponents.swift",
+                "Views/NetworkView.swift",
+                "Views/TopologyComponents.swift",
+            ]
         ),
         .testTarget(
             name: "BridgeCoreTests",

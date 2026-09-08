@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,35 +19,47 @@ from .client_config import (
     INSTALL_ROOT,
     UNSANDBOXED_MARKER,
     doctor,
-    install_client_config,
-    install_native_router_service,
     install_source_tree,
-    choose_native_router_port,
-    native_router_health,
-    select_relay,
+    prepare_legacy_opencodex_handoff,
+    restore_legacy_opencodex_handoff,
     uninstall_client_config,
     uninstall_native_router_service,
     write_native_catalog,
 )
 from .http_client import request_json
 from .model_detection import detect_models, discover_models
-from .relay_discovery import discover_relays
 from .models import (
     AGENTS,
     DEFAULT_GATEWAY_URL,
+    configured_agents,
     load_registry,
     model_alias,
     model_details,
     save_registry,
 )
-from .remote_clients import (
-    discover_remote_clients,
-    install_remote_client,
-    remote_client_status,
-    check_client_connectivity,
+from .routes import add_gateway, list_gateways, remove_gateway, select_gateway
+from .topology_sync import (
+    add_peer,
+    list_peers,
+    push_latest_release,
+    remove_peer,
+    serve_sync,
+    sync_once,
 )
-from .bridges import bridge_status, install_bridge, remove_bridge
-from .direct_clients import install_local_direct
+from .sync_service import install_sync_service, sync_service_status, uninstall_sync_service
+from .deployment import add_target, deploy_all, deploy_target, import_ssh_targets, list_targets, remove_target
+from .opencodex_sidecar import (
+    OPENCODEX_DEFAULT_PORT,
+    activate_sidecar,
+    apply_pending_opencodex_proxy_policy,
+    configure_opencodex_proxy_policy,
+    deactivate_sidecar,
+    installed_runtime,
+    opencodex_proxy_policy,
+    prepare_sidecar,
+    sidecar_health,
+    sidecar_integration_status,
+)
 from .release_updater import install_latest_release, latest_release_status
 
 
@@ -62,9 +76,119 @@ def run(command: List[str], check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(command, text=True, capture_output=True, check=check)
 
 
+def selected_sidecar_models() -> List[str]:
+    return [info["model"] for info in configured_agents(load_registry()).values()]
+
+
+def stage_opencodex_sidecar(_args: argparse.Namespace) -> Dict[str, Any]:
+    """Stage the signed App runtime without starting or reconfiguring a service."""
+    install_source_tree()
+    runtime = installed_runtime()
+    return {
+        "staged": True,
+        "runtime": str(runtime.root),
+        "version": runtime.version,
+        "commit": runtime.commit,
+        "service_restarted": False,
+        "codex_config_changed": False,
+        "transport_implementation": "upstream-opencodex",
+    }
+
+
+def opencodex_sidecar_status(_args: argparse.Namespace) -> Dict[str, Any]:
+    runtime = installed_runtime()
+    health = sidecar_health(runtime)
+    integration = (
+        sidecar_integration_status(runtime)
+        if health.get("ok") is True
+        else {"ok": False, "codex": {}}
+    )
+    codex = integration.get("codex")
+    codex = codex if isinstance(codex, dict) else {}
+    enabled = codex.get("desiredEnabled") is True
+    active = enabled and codex.get("state") == "current" and health.get("ok") is True
+    return {
+        "enabled": enabled,
+        "active": active,
+        "config_managed": codex.get("state") == "current",
+        "official_codex_restored": codex.get("state") == "absent",
+        "restart_codex_required": enabled != active,
+        "runtime": str(runtime.root),
+        "version": runtime.version,
+        "commit": runtime.commit,
+        "health": health,
+        "integration": integration,
+        "transport_implementation": "upstream-opencodex",
+    }
+
+
+def prepare_opencodex_sidecar(args: argparse.Namespace) -> Dict[str, Any]:
+    install_source_tree()
+    runtime = installed_runtime()
+    registry = load_registry()
+    prepared = prepare_sidecar(
+        runtime,
+        args.gateway_url,
+        selected_sidecar_models(),
+        port=int(args.port),
+    )
+    registry.pop("official_proxy", None)
+    registry["opencodex_port"] = int(args.port)
+    save_registry(registry)
+    return {**prepared, "official_network_owner": "upstream-codex-environment"}
+
+
+def activate_opencodex_sidecar(args: argparse.Namespace) -> Dict[str, Any]:
+    runtime = installed_runtime()
+    handoff = prepare_legacy_opencodex_handoff()
+    try:
+        activated = activate_sidecar(runtime, port=int(args.port))
+    except Exception as exc:
+        upstream_restore: Dict[str, Any] = {"restored": False}
+        try:
+            upstream_restore = deactivate_sidecar(runtime)
+        except Exception as restore_exc:
+            upstream_restore["error"] = f"{type(restore_exc).__name__}: {restore_exc}"
+        legacy_restore = restore_legacy_opencodex_handoff(handoff)
+        raise RuntimeError(
+            "OpenCodex activation failed; pre-handoff Codex config was restored "
+            f"(OpenCodex restore: {upstream_restore}, legacy restore: {legacy_restore}): {exc}"
+        ) from exc
+    INTEGRATION_DISABLED_MARKER.unlink(missing_ok=True)
+    return {
+        **activated,
+        "legacy_handoff": handoff,
+        "legacy_router_stopped": False,
+    }
+
+
+def deactivate_opencodex_sidecar(_args: argparse.Namespace) -> Dict[str, Any]:
+    result = deactivate_sidecar(installed_runtime())
+    return {**result, "legacy_router_stopped": False}
+
+
+def enable_opencodex_integration(args: argparse.Namespace) -> Dict[str, Any]:
+    prepared = prepare_opencodex_sidecar(args)
+    activated = activate_opencodex_sidecar(args)
+    return {**activated, "prepared": prepared}
+
+
 def install_gateway(args: argparse.Namespace) -> Dict[str, Any]:
     if sys.platform == "darwin":
         raise RuntimeError("Gateway installation is supported on Ubuntu/Linux, not macOS")
+    if not re.fullmatch(r"[A-Za-z0-9.:-]+", args.host):
+        raise RuntimeError("Gateway listen host must be an explicit IP address or hostname")
+    try:
+        admin_networks = [
+            str(ipaddress.ip_network(value.strip(), strict=False))
+            for value in args.admin_cidrs.split(",")
+            if value.strip()
+        ]
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid gateway admin CIDR: {exc}") from exc
+    if not admin_networks:
+        raise RuntimeError("At least one gateway admin CIDR is required")
+    args.admin_cidrs = ",".join(admin_networks)
     install_source_tree()
     key_source = Path(args.key_file).expanduser() if args.key_file else None
     if key_source:
@@ -81,15 +205,17 @@ def install_gateway(args: argparse.Namespace) -> Dict[str, Any]:
     unit = "\n".join(
         [
             "[Unit]",
-            "Description=PCL Codex Tailnet gateway",
-            "After=network-online.target tailscaled.service",
+            "Description=PCL Relay model protocol gateway",
+            "After=network-online.target",
             "Wants=network-online.target",
             "",
             "[Service]",
             "Type=simple",
             f"Environment=PYTHONPATH={INSTALL_ROOT}",
             f"Environment=PCL_LLM_API_KEY_FILE={GATEWAY_KEY}",
+            f"Environment=PCL_CODEX_GATEWAY_HOST={args.host}",
             f"Environment=PCL_CODEX_GATEWAY_PORT={args.port}",
+            f"Environment=PCL_RELAY_ADMIN_CIDRS={args.admin_cidrs}",
             f"ExecStart={exec_start}",
             "Restart=on-failure",
             "RestartSec=5",
@@ -117,6 +243,8 @@ def install_gateway(args: argparse.Namespace) -> Dict[str, Any]:
         "unit": str(SYSTEMD_UNIT),
         "key": str(GATEWAY_KEY),
         "key_mode": oct(GATEWAY_KEY.stat().st_mode & 0o777),
+        "listen_host": args.host,
+        "admin_cidrs": args.admin_cidrs,
         "service": status.stdout.strip(),
     }
 
@@ -132,6 +260,11 @@ def uninstall_gateway() -> Dict[str, Any]:
 
 
 def install_client(args: argparse.Namespace) -> Dict[str, Any]:
+    """Stage the cross-platform control plane without starting a router.
+
+    Explicit ``integration enable`` owns sidecar preparation and Codex
+    activation. Installation itself must not touch an active data plane.
+    """
     install_source_tree()
     INTEGRATION_DISABLED_MARKER.unlink(missing_ok=True)
     if getattr(args, "allow_unsandboxed_fallback", False):
@@ -143,31 +276,25 @@ def install_client(args: argparse.Namespace) -> Dict[str, Any]:
         os.chmod(UNSANDBOXED_MARKER, 0o600)
     registry = load_registry()
     registry["gateway"] = args.gateway_url
-    coordinator = str(os.environ.get("PCL_RELAY_COORDINATOR_URL") or "").rstrip("/")
-    if coordinator:
-        registry["topology_coordinator"] = coordinator
-    elif not any(host in args.gateway_url for host in ("127.0.0.1", "localhost", "[::1]")):
-        registry.setdefault("topology_coordinator", args.gateway_url.rstrip("/"))
-    node_id = str(os.environ.get("PCL_RELAY_NODE_ID") or "").strip()
-    node_name = str(os.environ.get("PCL_RELAY_NODE_NAME") or "").strip()
-    if node_id:
-        registry["topology_node_id"] = node_id
-    if node_name:
-        registry["topology_node_name"] = node_name
     registry.setdefault("models", {})
+    from .topology_sync import mark_topology_changed
+
+    mark_topology_changed(registry)
     save_registry(registry)
-    port = choose_native_router_port()
-    service = install_native_router_service(port)
-    port = int(service["port"])
-    result = install_client_config(args.gateway_url, router_port=port)
-    result["install_root"] = str(INSTALL_ROOT)
-    result["main_provider_preserved"] = True
-    result["official_route"] = "PCL Relay loopback passthrough"
-    result["native_router_service"] = service
-    result["native_router_health"] = native_router_health(port)
-    result["unsandboxed_fallback"] = UNSANDBOXED_MARKER.exists()
-    result["enabled"] = True
-    return result
+    runtime = installed_runtime()
+    return {
+        "installed": True,
+        "enabled": False,
+        "install_root": str(INSTALL_ROOT),
+        "gateway": args.gateway_url,
+        "runtime": str(runtime.root),
+        "runtime_version": runtime.version,
+        "runtime_commit": runtime.commit,
+        "main_provider_preserved": True,
+        "service_started": False,
+        "codex_config_changed": False,
+        "unsandboxed_fallback": UNSANDBOXED_MARKER.exists(),
+    }
 
 
 def select_models(values: List[str]) -> Dict[str, Any]:
@@ -222,6 +349,9 @@ def select_models(values: List[str]) -> Dict[str, Any]:
         raise RuntimeError("Select at least one PCL text model")
     registry["selected_agents"] = selected
     registry["agent_definitions"] = definitions
+    from .topology_sync import mark_topology_changed
+
+    mark_topology_changed(registry)
     save_registry(registry)
     catalog = write_native_catalog(registry)
     return {
@@ -251,28 +381,7 @@ def uninstall_client() -> Dict[str, Any]:
 
 
 def integration_status() -> Dict[str, Any]:
-    config_path = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
-    try:
-        text = config_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        text = ""
-    desired_enabled = not INTEGRATION_DISABLED_MARKER.exists()
-    config_managed = all(
-        marker in text
-        for marker in (
-            "# >>> pcl-relay native router root >>>",
-            "# >>> pcl-codex-bridge managed block >>>",
-        )
-    )
-    router = native_router_health(timeout=1)
-    return {
-        "enabled": desired_enabled,
-        "active": desired_enabled and config_managed and bool(router.get("reachable")),
-        "config_managed": config_managed,
-        "native_router": bool(router.get("reachable")),
-        "official_codex_restored": not desired_enabled and not config_managed,
-        "restart_codex_required": desired_enabled != config_managed,
-    }
+    return opencodex_sidecar_status(argparse.Namespace())
 
 
 def serve_native_router(args: argparse.Namespace) -> Dict[str, Any]:
@@ -430,7 +539,13 @@ def parser() -> argparse.ArgumentParser:
     client.set_defaults(handler=install_client)
     gateway = targets.add_parser("gateway")
     gateway.add_argument("--key-file")
+    gateway.add_argument("--host", default=os.environ.get("PCL_CODEX_GATEWAY_HOST", "127.0.0.1"))
     gateway.add_argument("--port", type=int, default=15722)
+    gateway.add_argument(
+        "--admin-cidrs",
+        default=os.environ.get("PCL_RELAY_ADMIN_CIDRS", "127.0.0.0/8,::1/128"),
+        help="Explicit comma-separated management CIDRs supplied by the network owner.",
+    )
     gateway.set_defaults(handler=install_gateway)
 
     models = commands.add_parser("models")
@@ -466,60 +581,91 @@ def parser() -> argparse.ArgumentParser:
     portal_launch.add_argument("--path", default="/")
     portal_launch.set_defaults(handler=lambda a: portal_open(a.gateway_url, a.path))
 
-    relays = commands.add_parser("relays")
-    relay_actions = relays.add_subparsers(dest="relays_action", required=True)
-    relay_discover = relay_actions.add_parser("discover")
-    relay_discover.add_argument("--port", type=int, default=15722)
-    relay_discover.add_argument("--timeout", type=float, default=2.0)
-    relay_discover.set_defaults(handler=lambda a: discover_relays(a.port, a.timeout))
-    relay_select = relay_actions.add_parser("select")
-    relay_select.add_argument("url")
-    relay_select.set_defaults(handler=lambda a: select_relay(a.url))
-
-    clients = commands.add_parser("clients")
-    client_actions = clients.add_subparsers(dest="clients_action", required=True)
-    client_discover = client_actions.add_parser("discover")
-    client_discover.add_argument("--timeout", type=float, default=2.0)
-    client_discover.set_defaults(handler=lambda a: discover_remote_clients(a.timeout))
-    client_status = client_actions.add_parser("status")
-    client_status.add_argument("ssh_target")
-    client_status.set_defaults(handler=lambda a: remote_client_status(a.ssh_target, a.gateway_url))
-    client_test = client_actions.add_parser("test")
-    client_test.add_argument("ssh_target")
-    client_test.add_argument("--node", default="")
-    client_test.add_argument("--quick", action="store_true")
-    client_test.set_defaults(
-        handler=lambda a: check_client_connectivity(
-            a.ssh_target,
-            a.gateway_url,
-            node_id=a.node,
-            deep=not a.quick,
+    routes = commands.add_parser("routes")
+    route_actions = routes.add_subparsers(dest="routes_action", required=True)
+    route_list = route_actions.add_parser("list")
+    route_list.add_argument("--probe", action="store_true")
+    route_list.add_argument("--timeout", type=int, default=15)
+    route_list.set_defaults(handler=lambda a: list_gateways(a.probe, a.timeout))
+    route_add = route_actions.add_parser("add")
+    route_add.add_argument("url")
+    route_add.add_argument("--name", default="")
+    route_add.set_defaults(handler=lambda a: add_gateway(a.url, a.name))
+    route_select = route_actions.add_parser("select")
+    route_select.add_argument("gateway")
+    route_select.set_defaults(handler=lambda a: select_gateway(a.gateway))
+    route_remove = route_actions.add_parser("remove")
+    route_remove.add_argument("gateway")
+    route_remove.set_defaults(handler=lambda a: remove_gateway(a.gateway))
+    route_proxy = route_actions.add_parser("proxy")
+    route_proxy_actions = route_proxy.add_subparsers(dest="route_proxy_action", required=True)
+    route_proxy_show = route_proxy_actions.add_parser("show")
+    route_proxy_show.set_defaults(handler=lambda a: opencodex_proxy_policy(installed_runtime()))
+    route_proxy_set = route_proxy_actions.add_parser("set")
+    route_proxy_set.add_argument("--proxy", default=None)
+    route_proxy_set.add_argument("--no-proxy", nargs="*", default=None)
+    route_proxy_set.set_defaults(
+        handler=lambda a: configure_opencodex_proxy_policy(
+            installed_runtime(), proxy=a.proxy, no_proxy=a.no_proxy
         )
     )
-    client_install = client_actions.add_parser("install")
-    client_install.add_argument("ssh_target")
-    client_install.set_defaults(handler=lambda a: install_remote_client(a.ssh_target, a.gateway_url))
-    client_update = client_actions.add_parser("update")
-    client_update.add_argument("ssh_target")
-    client_update.set_defaults(handler=lambda a: install_remote_client(a.ssh_target, a.gateway_url))
+    route_proxy_clear = route_proxy_actions.add_parser("clear")
+    route_proxy_clear.set_defaults(
+        handler=lambda a: configure_opencodex_proxy_policy(installed_runtime(), clear=True)
+    )
+    route_proxy_apply = route_proxy_actions.add_parser("apply")
+    route_proxy_apply.set_defaults(
+        handler=lambda a: {
+            **opencodex_proxy_policy(installed_runtime()),
+            **apply_pending_opencodex_proxy_policy(installed_runtime()),
+        }
+    )
 
-    bridges = commands.add_parser("bridges")
-    bridge_actions = bridges.add_subparsers(dest="bridges_action", required=True)
-    bridge_show = bridge_actions.add_parser("show")
-    bridge_show.set_defaults(handler=lambda a: bridge_status())
-    bridge_install = bridge_actions.add_parser("install")
-    bridge_install.add_argument("ssh_target")
-    bridge_install.add_argument("--remote-port", type=int, default=0)
-    bridge_install.set_defaults(handler=lambda a: install_bridge(a.ssh_target, a.remote_port))
-    bridge_remove = bridge_actions.add_parser("remove")
-    bridge_remove.add_argument("ssh_target")
-    bridge_remove.set_defaults(handler=lambda a: remove_bridge(a.ssh_target))
-
-    direct = commands.add_parser("direct")
-    direct_actions = direct.add_subparsers(dest="direct_action", required=True)
-    direct_install = direct_actions.add_parser("install")
-    direct_install.add_argument("ssh_target")
-    direct_install.set_defaults(handler=lambda a: install_local_direct(a.ssh_target))
+    sync = commands.add_parser("sync")
+    sync_actions = sync.add_subparsers(dest="sync_action", required=True)
+    sync_status = sync_actions.add_parser("status")
+    sync_status.add_argument("--probe", action="store_true")
+    sync_status.add_argument("--timeout", type=int, default=10)
+    sync_status.set_defaults(handler=lambda a: list_peers(a.probe, a.timeout))
+    sync_now = sync_actions.add_parser("now")
+    sync_now.add_argument("--timeout", type=int, default=10)
+    sync_now.set_defaults(handler=lambda a: sync_once(a.timeout))
+    sync_peers = sync_actions.add_parser("peers")
+    sync_peer_actions = sync_peers.add_subparsers(dest="sync_peer_action", required=True)
+    sync_peer_list = sync_peer_actions.add_parser("list")
+    sync_peer_list.add_argument("--probe", action="store_true")
+    sync_peer_list.add_argument("--timeout", type=int, default=10)
+    sync_peer_list.set_defaults(handler=lambda a: list_peers(a.probe, a.timeout))
+    sync_peer_add = sync_peer_actions.add_parser("add")
+    sync_peer_add.add_argument("url")
+    sync_peer_add.add_argument("--name", default="")
+    sync_peer_add.add_argument("--token-file", default="")
+    sync_peer_add.set_defaults(handler=lambda a: add_peer(a.url, a.name, a.token_file))
+    sync_peer_remove = sync_peer_actions.add_parser("remove")
+    sync_peer_remove.add_argument("peer")
+    sync_peer_remove.set_defaults(handler=lambda a: remove_peer(a.peer))
+    sync_serve = sync_actions.add_parser("serve")
+    sync_serve.add_argument("--host", default="0.0.0.0")
+    sync_serve.add_argument("--port", type=int, default=15726)
+    sync_serve.add_argument("--token-file", default="")
+    sync_serve.add_argument("--interval", type=int, default=15)
+    sync_serve.set_defaults(
+        handler=lambda a: serve_sync(a.host, a.port, a.token_file, a.interval)
+    )
+    sync_service = sync_actions.add_parser("service")
+    sync_service_actions = sync_service.add_subparsers(dest="sync_service_action", required=True)
+    sync_service_status_parser = sync_service_actions.add_parser("status")
+    sync_service_status_parser.set_defaults(handler=lambda a: sync_service_status())
+    sync_service_install = sync_service_actions.add_parser("install")
+    sync_service_install.add_argument("--host", default="0.0.0.0")
+    sync_service_install.add_argument("--port", type=int, default=15726)
+    sync_service_install.add_argument("--token-file", default="")
+    sync_service_install.add_argument("--interval", type=int, default=15)
+    sync_service_install.set_defaults(
+        handler=lambda a: install_sync_service(a.host, a.port, a.token_file, a.interval)
+    )
+    sync_service_uninstall = sync_service_actions.add_parser("uninstall")
+    sync_service_uninstall.set_defaults(handler=lambda a: uninstall_sync_service())
 
     updates = commands.add_parser("updates")
     update_actions = updates.add_subparsers(dest="updates_action", required=True)
@@ -528,19 +674,62 @@ def parser() -> argparse.ArgumentParser:
     update_install = update_actions.add_parser("install")
     update_install.add_argument("--force", action="store_true")
     update_install.set_defaults(handler=lambda a: install_latest_release(a.force))
+    update_push = update_actions.add_parser("push")
+    update_push.add_argument("--timeout", type=int, default=600)
+    update_push.set_defaults(handler=lambda a: push_latest_release(a.timeout))
+
+    deploy = commands.add_parser("deploy")
+    deploy_actions = deploy.add_subparsers(dest="deploy_action", required=True)
+    deploy_status = deploy_actions.add_parser("status")
+    deploy_status.add_argument("--probe", action="store_true")
+    deploy_status.add_argument("--timeout", type=int, default=20)
+    deploy_status.set_defaults(handler=lambda a: list_targets(a.probe, a.timeout))
+    deploy_targets = deploy_actions.add_parser("targets")
+    deploy_target_actions = deploy_targets.add_subparsers(dest="deploy_target_action", required=True)
+    deploy_target_add = deploy_target_actions.add_parser("add")
+    deploy_target_add.add_argument("--ssh-target", required=True)
+    deploy_target_add.add_argument("--control-url", default="")
+    deploy_target_add.add_argument("--name", default="")
+    deploy_target_add.set_defaults(
+        handler=lambda a: add_target(a.ssh_target, a.control_url, a.name)
+    )
+    deploy_target_remove = deploy_target_actions.add_parser("remove")
+    deploy_target_remove.add_argument("target_id")
+    deploy_target_remove.set_defaults(handler=lambda a: remove_target(a.target_id))
+    deploy_target_import = deploy_target_actions.add_parser("import-ssh")
+    deploy_target_import.set_defaults(handler=lambda a: import_ssh_targets())
+    deploy_one = deploy_actions.add_parser("one")
+    deploy_one.add_argument("target_id")
+    deploy_one.add_argument("--timeout", type=int, default=900)
+    deploy_one.set_defaults(handler=lambda a: deploy_target(a.target_id, timeout=a.timeout))
+    deploy_everywhere = deploy_actions.add_parser("all")
+    deploy_everywhere.add_argument("--timeout", type=int, default=900)
+    deploy_everywhere.set_defaults(handler=lambda a: deploy_all(a.timeout))
 
     integration = commands.add_parser("integration")
     integration_actions = integration.add_subparsers(dest="integration_action", required=True)
     integration_check = integration_actions.add_parser("status")
     integration_check.set_defaults(handler=lambda a: integration_status())
     integration_enable = integration_actions.add_parser("enable")
-    integration_enable.set_defaults(handler=install_client)
+    integration_enable.add_argument("--port", type=int, default=OPENCODEX_DEFAULT_PORT)
+    integration_enable.set_defaults(handler=enable_opencodex_integration)
     integration_disable = integration_actions.add_parser("disable")
-    integration_disable.set_defaults(handler=lambda a: uninstall_client())
+    integration_disable.set_defaults(handler=deactivate_opencodex_sidecar)
 
-    native_router = commands.add_parser("native-router", help=argparse.SUPPRESS)
-    native_router.add_argument("--port", type=int, default=15724)
-    native_router.set_defaults(handler=serve_native_router)
+    sidecar = commands.add_parser("sidecar")
+    sidecar_actions = sidecar.add_subparsers(dest="sidecar_action", required=True)
+    sidecar_stage = sidecar_actions.add_parser("stage")
+    sidecar_stage.set_defaults(handler=stage_opencodex_sidecar)
+    sidecar_status = sidecar_actions.add_parser("status")
+    sidecar_status.set_defaults(handler=opencodex_sidecar_status)
+    sidecar_prepare = sidecar_actions.add_parser("prepare")
+    sidecar_prepare.add_argument("--port", type=int, default=OPENCODEX_DEFAULT_PORT)
+    sidecar_prepare.set_defaults(handler=prepare_opencodex_sidecar)
+    sidecar_activate = sidecar_actions.add_parser("activate")
+    sidecar_activate.add_argument("--port", type=int, default=OPENCODEX_DEFAULT_PORT)
+    sidecar_activate.set_defaults(handler=activate_opencodex_sidecar)
+    sidecar_deactivate = sidecar_actions.add_parser("deactivate")
+    sidecar_deactivate.set_defaults(handler=deactivate_opencodex_sidecar)
 
     uninstall = commands.add_parser("uninstall")
     uninstall.add_argument("--gateway", action="store_true")
@@ -560,6 +749,14 @@ def main() -> None:
         from .gateway import main as gateway_main
 
         gateway_main()
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "native-router":
+        # Compatibility entrypoint for an already-running pre-OpenCodex
+        # launchd service. It stays outside the advertised parser so a staged
+        # upgrade cannot break that service before explicit sidecar activation.
+        legacy = argparse.ArgumentParser(add_help=False)
+        legacy.add_argument("--port", type=int, default=15724)
+        serve_native_router(legacy.parse_args(sys.argv[2:]))
         return
     args = parser().parse_args()
     if args.gateway_url is None:

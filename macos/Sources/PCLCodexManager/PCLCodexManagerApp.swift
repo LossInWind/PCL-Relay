@@ -9,8 +9,8 @@ struct PCLCodexManagerApp: App {
             MenuBarPanel()
                 .environmentObject(model)
         } label: {
-            Image(systemName: model.networkReady ? "point.3.connected.trianglepath.dotted" : "point.3.filled.connected.trianglepath.dotted")
-                .accessibilityLabel("PCL Relay，\(model.networkStatusTitle)")
+            Image(systemName: model.routeReady ? "arrow.triangle.branch" : "exclamationmark.arrow.triangle.2.circlepath")
+                .accessibilityLabel("PCL Relay，\(model.routeStatusTitle)")
                 .task { model.start() }
         }
         .menuBarExtraStyle(.window)

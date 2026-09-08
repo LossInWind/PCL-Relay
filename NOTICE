@@ -1,22 +1,15 @@
-The Responses-to-Chat conversion design is informed by codex-deepseek-proxy
-(MIT License, copyright 2026 Codex DeepSeek Proxy Contributors):
-https://github.com/himmetozcan/codex-deepseek-proxy
+This distribution embeds the complete pinned OpenCodex source tree and runtime:
+  upstream: https://github.com/lidge-jun/opencodex
+  version: 2.46.0
+  commit: bba63222d3eeb5c8e397edae35798225e4fa1a6f
+  tree: 068c7640eec7e0fb5bd737920e6b163630e50d6f
+  license: MIT
 
-The implementation in this repository was rewritten for the PCL Tailnet
-gateway and adds model discovery, a management-only MCP server, client
-installers, and a native Codex v2 sub-agent integration.
+The exact provenance is recorded in vendor/opencodex.UPSTREAM.json. The full
+upstream LICENSE, README, source, assets and runtime dependencies are bundled
+inside PCL Relay.app. OpenCodex provides the local data plane, official Codex
+passthrough, provider routing, model catalog, Responses streaming, cancellation,
+retry behavior, tool conversion, and Codex injection/journal/restore.
 
-The unified model catalog, official Codex forward-header allowlist, native v2
-sub-agent routing, health surface, and dashboard information architecture were
-informed by and selectively migrated from
-OpenCodex (MIT License, copyright 2026 opencodex contributors):
-https://github.com/lidge-jun/opencodex
-
-PCL Relay keeps a narrower personal-Tailnet scope: it does not import or
-manage the user's OpenAI credentials. OpenCodex is not installed or required at
-runtime; the integrated implementation is shipped as part of PCL Relay.
-
-Codex transport compatibility details including zstd request bodies, websocket
-prewarm fallback, and spawn-agent catalog priority were cross-checked against
-CCSwitchMulti (MIT License, copyright 2025 Jason Young):
-https://github.com/BigStrongSun/ccswitchmulti
+PCL Relay adds the PCL Tailnet gateway and a thin UI/control-plane wrapper. It
+does not import or manage the user's OpenAI credentials, Clash/VPN subscriptions,

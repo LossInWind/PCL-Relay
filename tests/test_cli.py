@@ -1,41 +1,130 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from pcl_codex_bridge.cli import (
+    activate_opencodex_sidecar,
     integration_status,
+    prepare_opencodex_sidecar,
     portal_status,
     select_models,
-    uninstall_client,
+    stage_opencodex_sidecar,
 )
+from pcl_codex_bridge import cli as cli_module
 
 
 class CliTests(unittest.TestCase):
-    def test_integration_disable_is_persistent_and_restores_official_config(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            codex_home = root / ".codex"
-            codex_home.mkdir()
-            config = codex_home / "config.toml"
-            config.write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
-            marker = root / "integration-disabled"
-            with (
-                mock.patch("pcl_codex_bridge.cli.INTEGRATION_DISABLED_MARKER", marker),
-                mock.patch("pcl_codex_bridge.cli.uninstall_native_router_service", return_value={"stopped": []}),
-                mock.patch("pcl_codex_bridge.cli.uninstall_client_config", return_value={"config_changed": True}),
-                mock.patch("pcl_codex_bridge.cli.native_router_health", return_value={"reachable": False}),
-                mock.patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}),
-            ):
-                disabled = uninstall_client()
-                status = integration_status()
-                marker_mode = marker.stat().st_mode & 0o777
-        self.assertFalse(disabled["enabled"])
-        self.assertTrue(disabled["official_codex_restored"])
-        self.assertEqual(marker_mode, 0o600)
-        self.assertFalse(status["enabled"])
-        self.assertTrue(status["official_codex_restored"])
+    def test_legacy_router_restart_entrypoint_is_unadvertised_but_still_dispatches(self):
+        with (
+            mock.patch.object(sys, "argv", ["pcl-codex", "native-router", "--port", "15724"]),
+            mock.patch("pcl_codex_bridge.cli.serve_native_router") as serve,
+            mock.patch("pcl_codex_bridge.cli.parser") as public_parser,
+        ):
+            cli_module.main()
+        public_parser.assert_not_called()
+        self.assertEqual(serve.call_args.args[0].port, 15724)
+
+    def test_sidecar_stage_does_not_start_or_activate_service(self):
+        runtime = mock.MagicMock(root=Path("/runtime"), version="2.46.0", commit="abc")
+        with (
+            mock.patch("pcl_codex_bridge.cli.install_source_tree") as install,
+            mock.patch("pcl_codex_bridge.cli.installed_runtime", return_value=runtime),
+            mock.patch("pcl_codex_bridge.cli.prepare_sidecar") as prepare,
+            mock.patch("pcl_codex_bridge.cli.activate_sidecar") as activate,
+        ):
+            result = stage_opencodex_sidecar(mock.MagicMock())
+        install.assert_called_once_with()
+        prepare.assert_not_called()
+        activate.assert_not_called()
+        self.assertFalse(result["service_restarted"])
+        self.assertFalse(result["codex_config_changed"])
+
+    def test_sidecar_prepare_uses_selected_models_without_persisting_network_policy(self):
+        runtime = mock.MagicMock()
+        args = mock.MagicMock(
+            gateway_url="http://100.113.234.58:15722/v1",
+            port=15725,
+        )
+        registry = {
+            "official_proxy": "http://127.0.0.1:7890",
+            "selected_agents": ["pcl_glm"],
+            "agent_definitions": {
+                "pcl_glm": {"model": "GLM-5.2", "description": "GLM"}
+            },
+        }
+        with (
+            mock.patch("pcl_codex_bridge.cli.install_source_tree"),
+            mock.patch("pcl_codex_bridge.cli.installed_runtime", return_value=runtime),
+            mock.patch("pcl_codex_bridge.cli.load_registry", return_value=registry),
+            mock.patch(
+                "pcl_codex_bridge.cli.prepare_sidecar",
+                return_value={"prepared": True, "codex_integration_enabled": False},
+            ) as prepare,
+            mock.patch("pcl_codex_bridge.cli.save_registry") as save,
+        ):
+            result = prepare_opencodex_sidecar(args)
+        self.assertEqual(prepare.call_args.args[2], ["GLM-5.2"])
+        self.assertNotIn("official_proxy", prepare.call_args.kwargs)
+        self.assertFalse(result["codex_integration_enabled"])
+        self.assertEqual(result["official_network_owner"], "upstream-codex-environment")
+        self.assertNotIn("official_proxy", save.call_args.args[0])
+        self.assertEqual(save.call_args.args[0]["opencodex_port"], 15725)
+
+    def test_integration_status_is_open_codex_native_state(self):
+        runtime = mock.MagicMock(root=Path("/runtime"), version="2.46.0", commit="abc")
+        with (
+            mock.patch("pcl_codex_bridge.cli.installed_runtime", return_value=runtime),
+            mock.patch(
+                "pcl_codex_bridge.cli.sidecar_health",
+                return_value={"ok": True, "pid": 42, "port": 15725},
+            ),
+            mock.patch(
+                "pcl_codex_bridge.cli.sidecar_integration_status",
+                return_value={
+                    "ok": True,
+                    "codex": {
+                        "clientId": "codex",
+                        "state": "current",
+                        "desiredEnabled": True,
+                    },
+                },
+            ),
+        ):
+            status = integration_status()
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["active"])
+        self.assertEqual(status["transport_implementation"], "upstream-opencodex")
+
+    def test_activation_failure_restores_upstream_and_legacy_config(self):
+        runtime = mock.MagicMock()
+        args = mock.MagicMock(port=15725)
+        handoff = {"changed": True, "backup": "/tmp/config.backup"}
+        with (
+            mock.patch("pcl_codex_bridge.cli.installed_runtime", return_value=runtime),
+            mock.patch(
+                "pcl_codex_bridge.cli.prepare_legacy_opencodex_handoff",
+                return_value=handoff,
+            ),
+            mock.patch(
+                "pcl_codex_bridge.cli.activate_sidecar",
+                side_effect=RuntimeError("injection refused"),
+            ),
+            mock.patch(
+                "pcl_codex_bridge.cli.deactivate_sidecar",
+                return_value={"active": False},
+            ) as deactivate,
+            mock.patch(
+                "pcl_codex_bridge.cli.restore_legacy_opencodex_handoff",
+                return_value={"restored": True},
+            ) as restore,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pre-handoff Codex config was restored"):
+                activate_opencodex_sidecar(args)
+        deactivate.assert_called_once_with(runtime)
+        restore.assert_called_once_with(handoff)
 
     def test_portal_status_uses_selected_gateway_as_https_proxy(self):
         completed = mock.MagicMock(returncode=0, stdout="200\ntext/html; charset=utf-8\n0.082", stderr="")

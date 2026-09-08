@@ -1,8 +1,8 @@
 # PCL Relay
 
-一个面向个人 Tailnet 的 PCL 内网模型中转站与 Codex 原生子 Agent 管理器。
+一个同时支持 macOS 与 Linux 的 PCL 模型路由器和 Codex 原生子 Agent 管理器。
 
-PCL Relay 是一个软件、一个安装包：它同时负责中转站、模型检测、设备拓扑、PCL 门户转发，以及 Codex Desktop / VS Code Remote-SSH 的原生子 Agent 接入。无需安装 OpenCodex、CCSwitch 或另一个代理应用。
+PCL Relay 只负责 endpoint/provider/model 路由、PCL gateway、Relay 心跳与模型拓扑同步、模型检测、PCL 门户和 Codex 接入，并内嵌完整、固定版本的 OpenCodex 数据面。网络连通、VPN/Clash/Tailscale/SSH 隧道和文件映射属于独立的外部基础设施；PCL Relay 默认收到的网络 endpoint 已经可用，且不与其他 App 交换状态。
 
 源码仓库：[`LossInWind/PCL-Relay`](https://github.com/LossInWind/PCL-Relay)
 
@@ -12,57 +12,47 @@ PCL Relay 是一个软件、一个安装包：它同时负责中转站、模型�
 
 ```text
 Codex Desktop / VS Code Codex
-       |
-       | openai provider + 现有 ChatGPT 登录
-       v
-PCL Relay 本机回环路由（仅 127.0.0.1）
+              |
+              v
+完整固定版 OpenCodex sidecar（仅 127.0.0.1）
        |                         |
        | 官方 GPT               | pcl/<模型>
        v                         v
-ChatGPT Codex 后端       Tailnet 中转站:15722 -> PCL API
-                                 |
-                                 v
-                      Codex 原生 custom role + spawn_agent
+ChatGPT Codex 后端       PCL gateway endpoint -> PCL API
 ```
 
-- 官方 GPT 仍使用原来的 `openai` provider、登录状态和模型名称；请求由应用内置路由安全透传。
-- PCL 模型使用 `pcl/DeepSeek-V4-Pro` 等带命名空间的模型 ID，避免误发到官方服务。
-- PCL 模型写入 Codex 原生 multi-agent v2 目录，并同步为 `~/.codex/agents/*.toml` custom roles。主 GPT 通过原生 `spawn_agent`/角色调用，创建、进度和结果显示在 Codex 自己的任务界面中。
-- 混合 provider 使用非保留的 `agents` V2 协作命名空间；路由只取消任务正文的 OpenAI 私有加密标记，保留官方 reasoning 密文与登录边界，因此 PCL 子 Agent 能读懂父任务。
-- 子 Agent 自动继承当前 Codex / VS Code 工作区，无需在 PCL Relay 中再选择目录。
-- PCL 上游的正文和可读推理轨迹会逐段转换为 Responses 事件；工具参数统一缓冲到完整值后，按工具声明验证为合法 JSON 才交给 Codex。单字符串自由文本工具可做确定性恢复，其他坏参数返回明确协议错误，不会污染下一轮上下文或伪装成网络断线。
-- PCL API 当前未公开原生 `reasoning_effort` 参数。Codex 的 low / medium / high / xhigh 会采用明确标注的提示词兼容映射，请求值、实际映射和降级方式同时写入响应元数据与中转站日志。
-- Responses 的 `max_output_tokens` 同时包含推理与可见输出。PCL Relay 会按推理强度保留最低总预算（high 为 8192、xhigh 为 12288，可通过环境变量调整），避免推理耗尽预算后丢失正文或工具调用。
-- PCL 子 Agent 支持 Codex 原生远程上下文压缩：旧版 `/responses/compact` 与新版 `compaction_trigger` 均由所选 PCL 模型生成检查点摘要，并使用与 OpenCodex / CCSwitchMulti 兼容的 `ocx1` 信封安全续跑；压缩不会退回 GPT，也不会把 PCL Key 发到客户端。
-- 官方 GPT 流在返回响应头前只有 15 秒硬截止时间和最多 3 次尝试；失败会立即显示为可诊断错误，不会让 Codex 静默“正在思考”数分钟。SSE 已开始后的中断只结束当前流，不会再拼接第二个 HTTP 响应。
-- 官方代理通过真实 ChatGPT HTTPS 响应验证，而不是只看 Clash 端口是否打开；因此不绑定订阅名称或节点，只要当前订阅能通过标准 HTTP 代理访问官方端点即可。
-- MCP 只保留模型发现和健康状态，不执行任务，也不再启动外部 `codex exec`。
+- 本机路由、官方 ChatGPT Codex 透传、模型目录、Responses SSE、取消、重试、工具调用转换、Codex 注入、journal 和 restore 全部直接运行固定上游 OpenCodex 2.46.0 的完整源码。
+- App 固定使用 OpenCodex 文档列出的 Bun 1.3.14 HTTP/SSE 上游回退路径，避免 macOS HTTP 代理可用但 WSS 被出口重置时触发双层重试；Codex→sidecar 的 Responses WebSocket 仍由 OpenCodex 原生实现承接。
+- 官方 GPT 保留现有 ChatGPT 登录、模型名称和 Codex 行为；PCL Relay 不解析、重写或自行重试官方请求。
+- PCL gateway 通过 OpenCodex 成熟的 `openai-chat` adapter 接入，`pcl/<模型>` 才会发往已配置 gateway endpoint，官方请求不会进入 PCL gateway。
+- PCL 模型由 OpenCodex 写入 Codex 主模型目录，并通过它的 `multiAgentMode=v2` + `keepNativeChatGptOnV1` 混合模式成为原生 `spawn_agent` 子 Agent；官方父会话保留可读任务，PCL 子 Agent 继承当前工作区。
+- App 只把现有 Codex 可执行文件的发现结果交给 OpenCodex 标准 `CODEX_CLI_PATH` 入口；Codex 版本探测、runtime 持久化、目录抽取和兼容裁剪继续由 OpenCodex 完成。
+- App 只负责 UI、请求路由拓扑、PCL gateway 和显式 provider 配置，不实现 HTTP/SSE/重试/取消/协议转换。
+- App 打开、刷新或升级只暂存经过 provenance 校验的 sidecar，不重启健康数据面，也不修改 `~/.codex/config.toml`。
+- 启用时先健康检查，再由 OpenCodex 原生集成完成注入；失败先调用上游 restore，再原子恢复交接前配置。停用只恢复 Codex 原生配置，sidecar 保持运行。
+- MCP 只保留模型发现和健康状态，不执行任务，也不启动外部 `codex exec`。
 
-PCL API Key 默认只保存在所选中转站的 `~/.config/pcl-codex-bridge/api-key`（权限 `600`）。普通 Tailnet 客户端、Codex 配置和子 Agent 上下文均不保存该 Key。
+PCL API Key 默认只保存在所选 gateway 的 `~/.config/pcl-codex-bridge/api-key`（权限 `600`）。普通客户端、Codex 配置和子 Agent 上下文均不保存该 Key。
 
 ## 可视化应用
 
-macOS 的 **PCL Relay.app** 按用户任务收成三个联动页面：
+macOS 的 **PCL Relay.app** 按用户任务收成三个联动页面；Linux 使用包含同一数据面的 `pcl-codex` 命令行应用：
 
-- **网络**：只分为连接拓扑和设备管理。拓扑回答“怎么连、经过谁”；设备行集中显示可用状态、当前路径、客户端版本和一个主操作。
+- **路由**：以拓扑图显示 Codex → OpenCodex → official/PCL gateway → PCL API 的分流，并管理中转站目录、Relay 心跳和多端模型拓扑同步；不管理设备网络。
 - **模型与 Agent**：统一模型目录、对话/流式/工具能力检测、启用角色和 Codex 使用提示。
 - **PCL 门户**：只负责通过当前中转站打开 API 广场、用量和 Key 页面；使用隔离浏览器资料，不修改 macOS 全局代理。
 
-PCL Relay 作为菜单栏应用运行：关闭完整设置不会退出，右上角图标可直接刷新网络、检测模型、打开门户或进入 Agent 设置。应用使用 macOS 登录项自动启动，不使用 KeepAlive；用户选择“退出应用”后不会在当前登录会话被强行拉起。
+PCL Relay 作为菜单栏应用运行：关闭完整设置不会退出，右上角图标可刷新路由状态、检测模型、打开门户或进入 Agent 设置。应用使用 macOS 登录项自动启动，不使用 KeepAlive；用户选择“退出应用”后不会在当前登录会话被强行拉起。
 
-菜单栏和完整设置均提供“Codex PCL 子 Agent”总开关。关闭后停止本机回环路由并只移除 PCL Relay 管理的配置、目录和角色，Codex 恢复官方 provider 与原有登录；关闭状态会持久化，App 重启后不会自动重新启用。
+菜单栏和完整设置均提供“Codex PCL 子 Agent”总开关。启用会先准备健康 sidecar，再显式交给 OpenCodex 原生集成；关闭仅让 OpenCodex 恢复 Codex 官方配置，不停止 sidecar，不影响其他正在运行的客户端。
 
-菜单栏状态同时检查 PCL 中转站与官方 GPT 实际路由；两者会分别暴露健康结果，避免“中转站正常”掩盖官方代理已经失效。
+菜单栏状态只表达 PCL Relay 自己的 gateway/sidecar/provider/同步协议状态。网络可达性和网络恢复状态由外部基础设施独立展示，PCL Relay 不读取或重复计算第二份状态。
 
 Embedding、重排序、语音、OCR 和图像模型可以在模型目录中查看，但不会被误注册成代码子 Agent。
 
-当前 Mac 使用健康中转站不依赖 SSH；SSH 只决定能否从设备管理页面远程安装、修复和升级其他电脑。
+PCL Relay 不枚举 Tailnet 设备、不建立桥接、不选择 VPN/代理节点，也不挂载远程文件。用户先提供可用 gateway/control URL；PCL Relay 只对这些 URL 做自身协议级验证。对于尚未安装的节点，用户可以额外逐项登记一个已经可用的 SSH alias，Relay 只用它执行固定的首次安装流程，不读取 SSH inventory，也不修复网络。
 
-自动拓扑始终按“设备直连 PCL 内网 API → Tailnet 直连中转站 → 经其他设备二次转发”的顺序选择，并在每次扫描后用实测结果替换失效或低优先级的旧规划。
-
-每个已安装客户端都会实测自身到 PCL API 和中转站的路径，并在 Tailnet 内按 30 秒固定轮次发送一份不含密钥的心跳。中转站保留最近四轮，应用只发布所有活跃客户端均已上报的最新完整轮次，因此不同 Mac 会收敛到同一份拓扑，而不是根据 SSH 凭据、设备名称或在线状态猜测路径。
-
-不完整的新轮次不会覆盖上一轮完整拓扑；心跳超过 120 秒自动失效，新加入的客户端从第一次上报的轮次开始参与共识。
+多端同步使用独立的 `pcl-relay-topology/1` 控制协议，默认经用户已建立的 Tailscale 地址传输。同步白名单仅包含 gateway 目录、当前 gateway、PCL Agent 模型选择和逻辑版本；本机 peer 地址、token 文件、网络状态及任何凭据都不进入同步文档。节点默认监听 `0.0.0.0:15726`，无 token 时只接受 loopback/Tailnet 来源；PCL Relay 不调用 Tailscale CLI，也不负责其登录、节点或连通性。
 
 构建并安装：
 
@@ -71,14 +61,25 @@ Embedding、重排序、语音、OCR 和图像模型可以在模型目录中查�
 open -a "PCL Relay"
 ```
 
-新 Mac 只需安装 PCL Relay、登录同一个 Tailnet，并在 App 中安装 Codex 集成。应用内包含自包含客户端，不要求单独安装本项目源码。
+新 Mac 安装 PCL Relay 后，在 App 中填写/选择已可达的 gateway 并安装 Codex 集成。应用内包含自包含客户端，不要求单独安装本项目源码。
 
-设备管理顶部的“版本更新”栏统一处理升级：
+Linux 发布包按架构提供：
+
+```bash
+tar -xzf PCL-Relay-linux-x86_64.tar.gz
+cd PCL-Relay-linux-x86_64
+./install.sh
+~/.local/bin/pcl-codex --gateway-url http://127.0.0.1:15722/v1 integration enable
+```
+
+`aarch64` 使用同名的 `PCL-Relay-linux-aarch64.tar.gz`。两个包都包含完整固定 OpenCodex 和目标架构 Bun runtime；`install.sh` 只暂存并校验，不自动注册 systemd、不修改活动 Codex 配置。显式执行 `integration enable` 才会由 OpenCodex 准备服务并接管 Codex 集成。
+
+路由页的“版本更新”栏处理当前设备升级：
 
 - 本机从 [`LossInWind/PCL-Relay` GitHub Releases](https://github.com/LossInWind/PCL-Relay/releases) 检查、下载并校验正式安装包。
-- 本机升级并重新打开后，可把同一版本一键同步到所有可管理的 macOS/Linux 远端客户端。
-- 远端设备优先直接下载并校验 GitHub Release 的跨平台客户端；只有 GitHub 不可达、资产缺失或校验失败时，才通过当前 Mac 接收完全相同的版本。不能访问公网的 A6000 Pod 仍可升级。
-- 单台设备仍可在自己的设备行中刷新、测试连通性或执行接入/修复/升级。
+- macOS 只选择 `PCL-Relay-macOS.zip`；Linux 按运行架构选择 `PCL-Relay-linux-x86_64.tar.gz` 或 `PCL-Relay-linux-aarch64.tar.gz`。
+- 已接入节点不通过 SSH 升级。“更新已接入节点”通过鉴权 Relay/Tailscale 控制面持久化版本和不可变资产清单：在线节点立即领取，离线节点恢复心跳后自动补领，同一 offer 不会重复安装。每个节点先从 GitHub 下载自己的平台包；只有 GitHub 失败时，节点才从已登记的拓扑 peers 流式拉取同版本、同平台的 verified cache。两种来源均使用清单中的大小和 SHA-256，并继续执行 macOS 签名或 Linux provenance/Bun 校验，过程中不重启模型数据面。
+- “从 SSH 配置导入”只在用户点击后读取字面的 `Host` alias，用 `ssh -G` 本地解析并按 HostName 去重，不连接远端或读取密钥。“一键安装/接入全部”仅处理这批明确登记的裸节点。通常每台设备只需已有 SSH alias，目标 `http://HostName:15726` 会自动推导；特殊拓扑才需要手动覆盖。凭据不保存、不同步。目标先从 GitHub 取自己平台的包，失败才从发起节点的 verified cache 传输。安装完成并通过心跳后成为普通 peer，以后只走上述控制面更新。若本机版本尚未发布齐三个平台资产，部署会明确阻止，绝不静默安装旧版。
 - `pcl_codex_bridge/VERSION` 是唯一版本源；App 安装包、Python 客户端、中转站健康检查、设备心跳和远端期望版本在构建与安装时都从它生成并核对。
 
 ## 使用原生子 Agent
@@ -106,36 +107,45 @@ open -a "PCL Relay"
 
 ```bash
 ./bin/pcl-codex install gateway --key-file ~/.config/pcl-llm/api-key
-./bin/pcl-codex install client
+./bin/pcl-codex sidecar stage
+./bin/pcl-codex sidecar prepare
+./bin/pcl-codex sidecar activate
 ~/.local/bin/pcl-codex doctor
 ~/.local/bin/pcl-codex models discover
 ~/.local/bin/pcl-codex models detect
 ~/.local/bin/pcl-codex models select
 pcl-codex updates status
 pcl-codex updates install
+pcl-codex updates push
+pcl-codex routes list --probe
+pcl-codex routes add http://relay:15722/v1 --name "PCL relay"
+pcl-codex routes select <gateway-id-or-url>
+pcl-codex sync serve --host 0.0.0.0 --port 15726
+pcl-codex sync peers add http://peer:15726 --token-file ~/.config/pcl-relay/sync-token
+pcl-codex sync now
 ```
 
 常用管理命令：
 
-- `pcl-codex relays discover` / `relays select <url>`：发现并选择 Tailnet 中转站。
-- `pcl-codex clients discover` / `clients install <ssh-alias>`：发现其他 macOS/Linux 设备并安装完整客户端。
+- `pcl-codex routes list|add|select|remove`：维护已可达 PCL gateway 目录并只切换 `pcl` provider；活动 OpenCodex 切换失败会恢复旧 provider，未运行时只保存下次启用所需选择。
+- `pcl-codex routes proxy show|set|clear|apply`：显式查看或修改 OpenCodex 原生 `proxy/noProxy`；默认不设置、不自动发现，配置按设备本地保存且不参加多端同步。该设置是 OpenCodex 的启动配置：PCL Relay 通过上游 `memory` 与 `restart` 契约应用，空闲时安全排空并重启；有活动请求时只标记待应用，不中断会话。
+- `pcl-codex sync status|now|peers|serve`：运行 Relay 心跳和多端模型拓扑同步；不发现或修改底层网络。
 - `pcl-codex portal status` / `portal open --path /wallet`：检查或打开 PCL 门户转发。
-- `pcl-codex direct install <ssh-alias>`：让可直接访问 PCL API 的远端主机使用本地回环适配器。
-- `pcl-codex bridges install <ssh-alias>`：仅在直连不可用时建立 Mac 回环桥接。
 - `pcl-codex updates status` / `updates install`：检查并安装最新 GitHub Release；安装前校验 SHA-256 和应用签名完整性。
+- `pcl-codex updates push`：经 Relay/Tailscale 控制面持久化同一版本升级请求；在线节点立即执行，离线节点恢复同步后补领。节点优先从 GitHub 获取本平台包，失败时从其他 Relay 节点拉取相同摘要的已验证缓存，再校验、安装并报告结果。节点间不传凭据。
 - `pcl-codex uninstall`：停止本机路由并只撤销本工具管理的 Codex 配置；保留时间戳备份。
 - `pcl-codex uninstall --gateway`：停止中转站服务并保留 API Key。
 
 ## 安全边界
 
-- 中转网关只绑定 Tailscale IPv4；本机 Codex 路由只绑定 `127.0.0.1`。
-- 路由根据模型命名空间选择上游：PCL 请求不会携带 OpenAI 登录头，官方请求不会发往 PCL 网关。
-- 官方透传只允许必要的 Codex 身份与任务元数据头，Cookie 和任意入站头不会跨信任边界。
-- 安装器只管理带标记的 `~/.codex/config.toml` 区块，并在修改前创建备份；检测到冲突的用户自定义根路由时会停止。
-- 远端安装使用普通用户权限，不重启 SSH、VS Code、Tailscale 或服务器上的其他任务，也不占用已有的 17731/17890 反向代理端口。
-- 网络职责保持单一：PCL Relay 只读取并验证官方 GPT 的既有出口；Clash 订阅、节点优选、系统代理与非 PCL 网络修复交给 Haichen Services。Relay 不扫描常见代理端口，也不主动切换网络。
-- 每台客户端动态选择空闲的本机回环端口，因此共享服务器上的其他用户不会复用本用户的路由进程。
-- 显式启用的全局 `multi_agent_v2=true` 会阻止跨 provider v1 路由，`doctor` 会将其报告为未就绪。
+- 中转网关默认绑定 `127.0.0.1`，远端监听地址必须通过 `PCL_CODEX_GATEWAY_HOST` 或安装参数显式提供；完整 OpenCodex sidecar 只绑定 `127.0.0.1`。
+- provider 隔离、官方凭据边界、请求头过滤、模型路由和 Codex 文件 journal/restore 均沿用固定上游 OpenCodex 实现。
+- PCL API Key 只存在中转站；客户端给 PCL provider 使用无权限占位值，真实 Key 不进入 Codex 或 App 配置。
+- 一次性交接只移除 PCL Relay 自己的旧标记块并先创建备份；检测到用户自定义根路由时由 OpenCodex 拒绝接管。
+- PCL Relay 不管理 Clash、VPN、订阅、节点、系统代理、Tailscale、SSH 隧道或文件映射，也不读取其他 App 发布的 endpoint 或状态文件；它只使用用户在自身配置中明确登记的 endpoint。
+- OpenCodex 依赖仍由上游固定的 Bun 1.4.0 安装，App 运行时则固定为 Bun 1.3.14；两者在构建时分别校验，runtime release id 也包含 Bun 版本，升级不会误复用旧 WSS 数据面。
+- 版本升级先完整下载、校验并暂存；已有健康 sidecar 和当前 Codex 配置不会因 App 启动或刷新而切换。
+- 完整上游版本、commit、tree 和 MIT License 记录在 `vendor/opencodex.UPSTREAM.json` 并随 App 分发。
 
 ## 开发测试与致谢
 
@@ -145,4 +155,4 @@ swift test
 ./scripts/package_release.sh
 ```
 
-Responses 转换参考了 MIT 许可的 [`codex-deepseek-proxy`](https://github.com/himmetozcan/codex-deepseek-proxy)。本应用的主要结构是“PCL Tailnet 中转站 + 内嵌 OpenCodex 能力”：统一模型目录、官方透传、`/alpha/search` 官方旁路和原生子 Agent 路由主要参考并迁移自 MIT 许可的 [`OpenCodex`](https://github.com/lidge-jun/opencodex)。[`BigStrongSun/ccswitchmulti`](https://github.com/BigStrongSun/ccswitchmulti) 用于交叉检查 zstd、WebSocket 回退、custom role 和 spawn-agent 模型优先级等兼容细节。运行时不依赖这些项目，也不会安装第二个应用。详见 `NOTICE`。
+本安装包直接内嵌 MIT 许可的完整固定版 [`OpenCodex`](https://github.com/lidge-jun/opencodex) 2.46.0（commit `bba63222d3eeb5c8e397edae35798225e4fa1a6f`），而不是选择性重写其传输层。其他历史参考与完整许可见 `NOTICE`。

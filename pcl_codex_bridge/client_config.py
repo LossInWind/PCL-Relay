@@ -28,8 +28,6 @@ from .models import (
 from .native_router import DEFAULT_PORT as NATIVE_ROUTER_DEFAULT_PORT
 from .native_router import PCL_MODEL_PREFIX, SERVICE_NAME as NATIVE_ROUTER_SERVICE
 from .http_client import gateway_root, request_json
-from .official_network import resolve_official_proxy
-from .relay_discovery import find_tailscale
 from .zstd_codec import library_source as zstd_library_source
 
 
@@ -231,6 +229,13 @@ def install_source_tree(source_root: Optional[Path] = None) -> Path:
         shutil.copy2(license_source, license_target)
     if notice_source.exists() and notice_source.resolve() != notice_target.resolve():
         shutil.copy2(notice_source, notice_target)
+
+    # Runtime staging is deliberately separate from activation/service restart.
+    # A PCL Relay app update may copy a verified sidecar while current Codex
+    # streams continue using the previously active data plane.
+    from .opencodex_sidecar import stage_bundled_runtime
+    stage_bundled_runtime(source_root)
+
     (INSTALL_ROOT / "VERSION").write_text(__version__ + "\n", encoding="utf-8")
     zstd_source = zstd_library_source()
     if zstd_source is not None:
@@ -327,6 +332,51 @@ def strip_managed_block(text: str) -> str:
 def strip_native_root_block(text: str) -> str:
     pattern = re.compile(r"\n?" + re.escape(ROOT_BEGIN) + r".*?" + re.escape(ROOT_END) + r"\n?", re.S)
     return pattern.sub("\n", text).rstrip() + ("\n" if text.strip() else "")
+
+
+def prepare_legacy_opencodex_handoff() -> Dict[str, Any]:
+    """Remove only PCL Relay-owned config blocks before OpenCodex takes over.
+
+    The legacy router, catalog and roles stay in place so existing processes
+    keep running. OpenCodex owns all subsequent injection and restoration.
+    """
+    config = codex_home() / "config.toml"
+    result: Dict[str, Any] = {
+        "config": str(config),
+        "changed": False,
+        "backup": "",
+        "legacy_router_stopped": False,
+        "legacy_artifacts_removed": False,
+    }
+    if not config.exists():
+        return result
+    original = config.read_text(encoding="utf-8")
+    updated = strip_native_root_block(strip_managed_block(original))
+    if updated == original:
+        return result
+    backup_path = backup(config)
+    if backup_path is None:
+        raise RuntimeError("Could not back up the legacy Codex configuration")
+    _atomic_write_text(config, updated)
+    result["changed"] = True
+    result["backup"] = str(backup_path)
+    return result
+
+
+def restore_legacy_opencodex_handoff(handoff: Dict[str, Any]) -> Dict[str, Any]:
+    """Atomically restore the exact pre-handoff config after activation failure."""
+    if handoff.get("changed") is not True:
+        return {"restored": False, "reason": "handoff_did_not_change_config"}
+    config = Path(str(handoff.get("config") or ""))
+    backup_path = Path(str(handoff.get("backup") or ""))
+    if (
+        not backup_path.is_file()
+        or backup_path.parent != config.parent
+        or not backup_path.name.startswith(config.name + ".backup-")
+    ):
+        raise RuntimeError("Legacy Codex handoff backup is missing or invalid")
+    _atomic_write_text(config, backup_path.read_text(encoding="utf-8"))
+    return {"restored": True, "config": str(config), "backup": str(backup_path)}
 
 
 def native_root_block(port: int, catalog: Path) -> str:
@@ -746,13 +796,9 @@ def choose_native_router_port() -> int:
 
 
 def detect_official_proxy() -> str:
-    """Read a configured official route without guessing local proxy ports.
+    """Read only explicit process/user configuration for legacy rollback."""
+    from .official_network import resolve_official_proxy
 
-    Haichen Services owns proxy discovery, subscriptions, node selection and
-    network recovery.  PCL Relay only consumes its published endpoint (or an
-    explicit environment/previously saved value) and later validates the
-    resulting official route.
-    """
     registry = load_registry()
     proxy, _source = resolve_official_proxy(str(registry.get("official_proxy") or ""))
     return proxy
@@ -965,7 +1011,7 @@ def select_relay(gateway_url: str) -> Dict[str, Any]:
         normalized += "/v1"
     parsed = urllib.parse.urlparse(normalized)
     if parsed.scheme != "http" or not parsed.hostname or parsed.port is None:
-        raise RuntimeError("Relay URL must look like http://<tailscale-node>:15722/v1")
+        raise RuntimeError("Gateway URL must look like http://<reachable-host>:<port>/v1")
     health = request_json(normalized.rsplit("/v1", 1)[0] + "/healthz", timeout=10)
     if not isinstance(health, dict) or health.get("status") != "ok":
         raise RuntimeError("Selected node is not a healthy PCL relay")
@@ -981,14 +1027,13 @@ def select_relay(gateway_url: str) -> Dict[str, Any]:
     registry["available_models"] = available_model_records(entries)
     registry.setdefault("models", {})
     save_registry(registry)
-    config = install_client_config(normalized)
     return {
         "selected_gateway": normalized,
         "previous_gateway": previous,
         "model_count": len(entries),
         "pcl_auth": "valid",
-        "codex_reload_required": True,
-        "config": config,
+        "sidecar_prepare_required": True,
+        "codex_reload_required": False,
         "main_provider_preserved": True,
     }
 
@@ -998,7 +1043,9 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
     config = home / "config.toml"
     result: Dict[str, Any] = {
         "gateway": False,
-        "tailscale": bool(find_tailscale()),
+        # Deprecated compatibility field for older App builds. Network state
+        # is intentionally not inspected here.
+        "tailscale": False,
         "codex": bool(find_codex()),
         "config_managed": False,
         # Keep the two legacy keys during the GUI migration.  They now describe
@@ -1058,23 +1105,19 @@ def doctor(gateway_url: str = DEFAULT_GATEWAY_URL) -> Dict[str, Any]:
         result["native_roles"] = len(managed_roles) == len(selected) and bool(selected)
         result["legacy_delegate_mcp"] = "[mcp_servers.pcl_agents]" in text or "[model_providers.pcl_internal]" in text
     router = native_router_health(
-        result["native_router_port"], timeout=10, probe_official=True
+        result["native_router_port"], timeout=10, probe_official=False
     )
     result["native_router"] = bool(router.get("reachable"))
     result["native_router_health"] = router
-    result["official_route_reachable"] = bool(router.get("official_route_reachable"))
-    result["official_route_http_status"] = int(router.get("official_route_http_status") or 0)
-    result["official_route_latency_ms"] = int(router.get("official_route_latency_ms") or 0)
-    result["official_route_error"] = str(router.get("official_route_error") or "")
-    result["official_proxy_source"] = str(router.get("official_proxy_source") or "unknown")
+    result["official_route_reachable"] = False
+    result["official_route_http_status"] = 0
+    result["official_route_latency_ms"] = 0
+    result["official_route_error"] = "not_owned_by_pcl_relay"
+    result["official_proxy_source"] = "external_network_owner"
     result["profile"] = result["native_router"]
     try:
         health = request_json(gateway_root(gateway_url).rsplit("/v1", 1)[0] + "/healthz", timeout=10)
         result["gateway"] = isinstance(health, dict) and health.get("status") == "ok"
-        if result["gateway"]:
-            # The relay only listens on its Tailscale address, so a successful
-            # health check is stronger evidence than a CLI-path check on macOS.
-            result["tailscale"] = True
     except Exception as exc:
         result["gateway_error"] = str(exc)
     return result

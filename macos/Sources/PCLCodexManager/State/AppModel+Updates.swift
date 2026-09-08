@@ -47,6 +47,33 @@ extension AppModel {
         }
     }
 
+    func pushLatestUpdateToTopology() {
+        guard !isPushingTopologyUpdate else { return }
+        isPushingTopologyUpdate = true
+        Task {
+            defer { isPushingTopologyUpdate = false }
+            do {
+                let result = try await runCLI(["updates", "push"])
+                commandLog = BridgeDecode.prettyJSON(result.stdout)
+                guard result.exitCode == 0 else { throw commandError(result) }
+                guard let data = result.stdout.data(using: .utf8),
+                      let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw NSError(domain: "PCLCodexManager", code: 7, userInfo: [NSLocalizedDescriptionKey: "升级推送返回了无效结果"])
+                }
+                let succeeded = payload["ok_count"] as? Int ?? 0
+                let count = payload["count"] as? Int ?? 0
+                if succeeded == count {
+                    show("升级指令已持久化，\(succeeded) 个 Relay 节点已接受：优先 GitHub，失败时使用拓扑缓存", .success)
+                } else {
+                    show("升级指令已持久化：\(succeeded)/\(count) 个在线节点已接受，其余节点恢复心跳后补领", .info)
+                }
+                await refreshRelaySync(showBanner: false)
+            } catch {
+                show("推送拓扑更新失败：\(error.localizedDescription)", .error)
+            }
+        }
+    }
+
     func restartApplication() {
         guard appRestartRequired else { return }
         let process = Process()

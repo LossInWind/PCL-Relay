@@ -7,6 +7,7 @@ from unittest import mock
 
 from pcl_codex_bridge.client_config import (
     BEGIN,
+    END,
     ROOT_BEGIN,
     ROOT_END,
     _make_tree_owner_writable,
@@ -19,6 +20,8 @@ from pcl_codex_bridge.client_config import (
     managed_block,
     migrate_thread_provider_index,
     native_router_health,
+    prepare_legacy_opencodex_handoff,
+    restore_legacy_opencodex_handoff,
     uninstall_client_config,
 )
 from pcl_codex_bridge.models import AGENTS, model_catalog
@@ -26,6 +29,42 @@ from pcl_codex_bridge.relay_discovery import find_tailscale
 
 
 class ClientConfigTests(unittest.TestCase):
+    def test_legacy_handoff_is_scoped_and_exactly_rollbackable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".codex"
+            home.mkdir()
+            config = home / "config.toml"
+            original = (
+                f"{ROOT_BEGIN}\n"
+                'model_provider = "pcl_relay_official"\n'
+                f"{ROOT_END}\n\n"
+                'model = "gpt-5.6-sol"\n\n'
+                f"{BEGIN}\n"
+                "[mcp_servers.pcl_relay]\n"
+                'command = "pcl-codex"\n'
+                f"{END}\n"
+            )
+            config.write_text(original, encoding="utf-8")
+            roles = home / "agents"
+            roles.mkdir()
+            role = roles / "pcl-glm.toml"
+            role.write_text("legacy role\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+                handoff = prepare_legacy_opencodex_handoff()
+
+            cleaned = config.read_text(encoding="utf-8")
+            self.assertTrue(handoff["changed"])
+            self.assertNotIn(ROOT_BEGIN, cleaned)
+            self.assertNotIn(BEGIN, cleaned)
+            self.assertIn('model = "gpt-5.6-sol"', cleaned)
+            self.assertEqual(Path(handoff["backup"]).read_text(encoding="utf-8"), original)
+            self.assertEqual(role.read_text(encoding="utf-8"), "legacy role\n")
+
+            config.write_text("partial OpenCodex injection\n", encoding="utf-8")
+            restored = restore_legacy_opencodex_handoff(handoff)
+            self.assertTrue(restored["restored"])
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
     def test_provider_index_migration_backs_up_and_preserves_other_rows(self):
         import sqlite3
 
@@ -175,12 +214,13 @@ class ClientConfigTests(unittest.TestCase):
                 install_source_tree(source)
             copytree.assert_not_called()
 
-    def test_proxy_detection_consumes_haichen_services_contract(self):
+    def test_legacy_proxy_detection_consumes_only_explicit_environment(self):
         with (
             mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
-            mock.patch(
-                "pcl_codex_bridge.official_network.haichen_services_proxy",
-                return_value="http://127.0.0.1:12450",
+            mock.patch.dict(
+                os.environ,
+                {"PCL_RELAY_OFFICIAL_PROXY": "http://127.0.0.1:12450"},
+                clear=True,
             ),
         ):
             selected = detect_official_proxy()
@@ -198,10 +238,6 @@ class ClientConfigTests(unittest.TestCase):
                 clear=False,
             ),
             mock.patch("pcl_codex_bridge.client_config.load_registry", return_value={}),
-            mock.patch(
-                "pcl_codex_bridge.official_network.haichen_services_proxy",
-                return_value=None,
-            ),
             mock.patch("pcl_codex_bridge.client_config.probe_official_proxy") as probe,
         ):
             selected = detect_official_proxy()

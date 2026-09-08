@@ -3,13 +3,13 @@ import BridgeCore
 import SwiftUI
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case network = "网络"
+    case routing = "路由"
     case models = "模型与 Agent"
     case portal = "PCL 门户"
     var id: String { rawValue }
     var symbol: String {
         switch self {
-        case .network: return "point.3.connected.trianglepath.dotted"
+        case .routing: return "arrow.triangle.branch"
         case .models: return "person.3.sequence.fill"
         case .portal: return "globe.asia.australia.fill"
         }
@@ -17,10 +17,10 @@ enum AppSection: String, CaseIterable, Identifiable {
 }
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
-    @AppStorage("selectedSection") private var sectionRaw = AppSection.network.rawValue
+    @AppStorage("selectedSection") private var sectionRaw = AppSection.routing.rawValue
 
     private var section: AppSection {
-        AppSection(rawValue: sectionRaw) ?? .network
+        AppSection(rawValue: sectionRaw) ?? .routing
     }
 
     private var sectionBinding: Binding<AppSection> {
@@ -43,7 +43,7 @@ struct RootView: View {
                 HeaderBar(section: sectionBinding)
                 Group {
                     switch section {
-                    case .network: NetworkView()
+                    case .routing: RoutingView()
                     case .models: ModelsAgentsView()
                     case .portal: PortalView()
                     }

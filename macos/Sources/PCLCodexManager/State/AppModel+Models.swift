@@ -29,7 +29,7 @@ extension AppModel {
             let decoded = try BridgeDecode.value(RelayServerStatus.self, from: result.stdout)
             serverStatus = decoded
             remoteServiceActive = decoded.status == "active"
-            remoteStatusText = "PID \(decoded.pid) · uptime \(decoded.uptimeSeconds)s · \(decoded.tailscaleIP):\(decoded.port) · scope: \(decoded.adminScope.joined(separator: ", "))"
+            remoteStatusText = "PID \(decoded.pid) · uptime \(decoded.uptimeSeconds)s · \(decoded.listenHost ?? decoded.tailscaleIP):\(decoded.port) · scope: \(decoded.adminScope.joined(separator: ", "))"
         } catch {
             remoteServiceActive = false
             remoteStatusText = error.localizedDescription

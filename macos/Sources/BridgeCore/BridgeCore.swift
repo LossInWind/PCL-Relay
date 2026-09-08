@@ -99,6 +99,7 @@ public struct RelayServerStatus: Codable, Equatable, Sendable {
     public let nodeName: String
     public let magicDNS: String
     public let tailscaleIP: String
+    public let listenHost: String?
     public let port: Int
     public let pid: Int
     public let uptimeSeconds: Int
@@ -110,6 +111,7 @@ public struct RelayServerStatus: Codable, Equatable, Sendable {
         case nodeName = "node_name"
         case magicDNS = "magic_dns"
         case tailscaleIP = "tailscale_ip"
+        case listenHost = "listen_host"
         case uptimeSeconds = "uptime_seconds"
         case adminScope = "admin_scope"
     }
@@ -153,6 +155,8 @@ public struct ReleaseUpdateStatus: Codable, Equatable, Sendable {
     public let currentVersion: String
     public let latestVersion: String
     public let updateAvailable: Bool
+    public let localNewerThanPublished: Bool?
+    public let topologyDeploymentReady: Bool?
     public let releaseURL: String
     public let publishedAt: String
     public let assetName: String
@@ -165,6 +169,8 @@ public struct ReleaseUpdateStatus: Codable, Equatable, Sendable {
         case currentVersion = "current_version"
         case latestVersion = "latest_version"
         case updateAvailable = "update_available"
+        case localNewerThanPublished = "local_newer_than_published"
+        case topologyDeploymentReady = "topology_deployment_ready"
         case releaseURL = "release_url"
         case publishedAt = "published_at"
         case assetName = "asset_name"
@@ -429,6 +435,163 @@ public struct ModelRegistry: Codable, Equatable, Sendable {
         case allChatReady = "all_chat_ready"
         case allStreamReady = "all_stream_ready"
         case allToolCompatible = "all_tool_compatible"
+    }
+}
+
+public struct GatewayRouteRecord: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let url: String
+    public let addedAt: String
+    public let selected: Bool
+    public let healthy: Bool?
+    public let modelCount: Int?
+    public let latencyMS: Int?
+    public let error: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, url, selected, healthy, error
+        case addedAt = "added_at"
+        case modelCount = "model_count"
+        case latencyMS = "latency_ms"
+    }
+}
+
+public struct GatewayRouteCatalog: Codable, Equatable, Sendable {
+    public let selectedGateway: String
+    public let gateways: [GatewayRouteRecord]
+    public let count: Int
+    public let networkManaged: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case gateways, count
+        case selectedGateway = "selected_gateway"
+        case networkManaged = "network_managed"
+    }
+}
+
+public struct OpenCodexProxyPolicy: Codable, Equatable, Sendable {
+    public let proxy: String
+    public let noProxy: [String]
+    public let configured: Bool
+    public let implementation: String
+    public let automaticDiscovery: Bool
+    public let networkManaged: Bool
+    public let restartRequired: Bool?
+    public let serviceRestarted: Bool?
+    public let activeTurnCount: Int?
+    public let lifecycleReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case proxy, configured, implementation
+        case noProxy = "no_proxy"
+        case automaticDiscovery = "automatic_discovery"
+        case networkManaged = "network_managed"
+        case restartRequired = "restart_required"
+        case serviceRestarted = "service_restarted"
+        case activeTurnCount = "active_turn_count"
+        case lifecycleReason = "lifecycle_reason"
+    }
+}
+
+public struct RelaySyncRevision: Codable, Equatable, Sendable {
+    public let counter: Int
+    public let origin: String
+}
+
+public struct RelaySyncPeer: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let url: String
+    public let online: Bool?
+    public let latencyMS: Int?
+    public let error: String
+    public let version: String?
+    public let digest: String?
+    public let revision: RelaySyncRevision?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, url, online, error, version, digest, revision
+        case latencyMS = "latency_ms"
+    }
+}
+
+public struct RelaySyncCatalog: Codable, Equatable, Sendable {
+    public let protocolName: String
+    public let nodeID: String
+    public let nodeName: String
+    public let revision: RelaySyncRevision
+    public let digest: String
+    public let peers: [RelaySyncPeer]
+    public let count: Int
+    public let networkManaged: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case revision, digest, peers, count
+        case protocolName = "protocol"
+        case nodeID = "node_id"
+        case nodeName = "node_name"
+        case networkManaged = "network_managed"
+    }
+}
+
+public struct RelaySyncServiceStatus: Codable, Equatable, Sendable {
+    public let installed: Bool
+    public let active: Bool
+    public let host: String
+    public let port: Int
+    public let error: String
+    public let modelDataPlaneRestarted: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case installed, active, host, port, error
+        case modelDataPlaneRestarted = "model_data_plane_restarted"
+    }
+}
+
+public struct DeploymentTarget: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let sshTarget: String
+    public let controlURL: String
+    public let addedAt: String
+    public let ssh: Bool?
+    public let receiverOnline: Bool?
+    public let relayVersion: String?
+    public let relayNodeID: String?
+    public let latencyMS: Int?
+    public let system: String?
+    public let architecture: String?
+    public let version: String?
+    public let installed: Bool?
+    public let error: String?
+    public let receiverError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, ssh, system, architecture, version, installed, error
+        case sshTarget = "ssh_target"
+        case controlURL = "control_url"
+        case addedAt = "added_at"
+        case receiverOnline = "receiver_online"
+        case relayVersion = "relay_version"
+        case relayNodeID = "relay_node_id"
+        case latencyMS = "latency_ms"
+        case receiverError = "receiver_error"
+    }
+}
+
+public struct DeploymentTargetCatalog: Codable, Equatable, Sendable {
+    public let schema: Int
+    public let targets: [DeploymentTarget]
+    public let count: Int
+    public let discovery: Bool
+    public let credentialsSynchronized: Bool
+    public let networkManaged: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case schema, targets, count, discovery
+        case credentialsSynchronized = "credentials_synchronized"
+        case networkManaged = "network_managed"
     }
 }
 

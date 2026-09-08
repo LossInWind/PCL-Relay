@@ -9,7 +9,6 @@ final class AppModel: ObservableObject {
     @Published var registry: ModelRegistry?
     @Published var serverStatus: RelayServerStatus?
     @Published var portalStatus: PortalStatus?
-    @Published var relayDiscovery: RelayDiscovery?
     @Published var selectedAgents = Set(AgentDefinition.all.map(\.id))
     @Published var remoteServiceActive = false
     @Published var remoteStatusText = "尚未检查"
@@ -22,35 +21,41 @@ final class AppModel: ObservableObject {
     @Published var isRestartingGateway = false
     @Published var isCheckingPortal = false
     @Published var isOpeningPortal = false
-    @Published var isDiscoveringNodes = false
-    @Published var isSelectingRelay = false
     @Published var releaseUpdate: ReleaseUpdateStatus?
     @Published var isCheckingAppUpdate = false
     @Published var isInstallingAppUpdate = false
+    @Published var isPushingTopologyUpdate = false
     @Published var appRestartRequired = false
-    @Published var isUpdatingAllClients = false
-    @Published var installingClientTarget: String?
-    @Published var isApplyingTopology = false
-    @Published var topologyRoutes: [String: String] = [:]
-    @Published var deviceTests: [String: DeviceConnectivityTest] = [:]
-    @Published var refreshingDeviceIDs = Set<String>()
-    @Published var testingDeviceIDs = Set<String>()
     @Published var banner: BannerMessage?
     @Published var launchAtLoginEnabled = false
     @Published var launchAtLoginStatusText = "正在配置登录启动"
     @Published var codexReloadRequired = false
     @Published var integrationEnabled = true
+    @Published var integrationActive = false
     @Published var isTogglingIntegration = false
+    @Published var gatewayRoutes: GatewayRouteCatalog?
+    @Published var openCodexProxyPolicy: OpenCodexProxyPolicy?
+    @Published var relaySync: RelaySyncCatalog?
+    @Published var relaySyncService: RelaySyncServiceStatus?
+    @Published var deploymentTargets: DeploymentTargetCatalog?
+    @Published var selectedGatewayID: String?
+    @Published var isRefreshingRoutes = false
+    @Published var isAddingGateway = false
+    @Published var isSwitchingGateway = false
+    @Published var isSavingProxyPolicy = false
+    @Published var isRefreshingSync = false
+    @Published var isSynchronizing = false
+    @Published var isAddingSyncPeer = false
+    @Published var isTogglingSyncService = false
+    @Published var isRefreshingDeploymentTargets = false
+    @Published var isAddingDeploymentTarget = false
+    @Published var isDeployingTopology = false
 
     let runner = CommandRunner()
     private let loginItemManager = LoginItemManager()
     var detectionJob: UUID?
-    private var consensusMonitor: Task<Void, Never>?
     private var didStart = false
     private var didBootstrapClient = false
-    let relayNodeName = "haichen-pcl-linux-3070ti"
-    let relayMagicDNS = "haichen-pcl-linux-3070ti.tail132f30.ts.net"
-    let relayTailscaleIP = "100.113.234.58"
 
     struct BannerMessage: Identifiable, Equatable {
         enum Kind { case success, error, info }
@@ -63,71 +68,23 @@ final class AppModel: ObservableObject {
         registry?.gateway ?? "http://haichen-pcl-linux-3070ti.tail132f30.ts.net:15722/v1"
     }
 
-    var currentRelay: RelayCandidate? {
-        relayDiscovery?.nodes.first(where: { $0.selected && $0.gateway })
-    }
-
-    var tailnetNodes: [RelayCandidate] {
-        relayDiscovery?.nodes ?? []
-    }
-
-    var manageableRemoteClients: [RelayCandidate] {
-        tailnetNodes.filter {
-            !$0.isSelf
-                && $0.online
-                && $0.clientStatus?.ssh == true
-                && !($0.sshTarget ?? "").isEmpty
-                && $0.clientStatus?.supportedSystem != false
-                && $0.feasibility?.recommendedRoute != "unavailable"
-        }
-    }
-
-    var remoteUpdateCandidates: [RelayCandidate] {
-        manageableRemoteClients.filter {
-            $0.clientStatus?.updateAvailable == true
-                || $0.clientStatus?.nativeV2 != true
-                || $0.clientStatus?.nativeRoles != true
-        }
-    }
-
     var codexIntegrationReady: Bool {
-        doctor?.codex == true
-            && doctor?.configManaged == true
-            && doctor?.nativeRouter == true
-            && doctor?.nativeCatalog == true
-            && doctor?.nativeV2 == true
-            && doctor?.nativeRoles == true
+        doctor?.codex == true && integrationActive
     }
 
-    var relayReady: Bool {
-        doctor?.gateway == true && doctor?.tailscale == true
+    var routeReady: Bool {
+        doctor?.gateway == true && integrationActive
     }
 
-    var officialRouteReady: Bool {
-        doctor?.officialRouteReachable == true
+    var routeStatusTitle: String {
+        if doctor?.gateway != true { return "PCL endpoint 不可用" }
+        if !integrationActive { return "Codex 集成待启用" }
+        return "模型路由正常"
     }
 
-    var networkReady: Bool {
-        relayReady && officialRouteReady
-    }
-
-    var networkStatusTitle: String {
-        if !relayReady { return "中转站异常" }
-        if !officialRouteReady {
-            return doctor?.officialProxySource == "haichen-services"
-                ? "GPT 网络异常 · 请检查 Haichen Services"
-                : "GPT 链路异常"
-        }
-        return "网络正常"
-    }
-
-    var officialRouteOwnershipText: String {
-        switch doctor?.officialProxySource {
-        case "haichen-services": return "官方 GPT 出口由 Haichen Services 管理"
-        case "PCL_RELAY_OFFICIAL_PROXY", "HTTPS_PROXY", "https_proxy", "registry":
-            return "官方 GPT 使用已配置出口；PCL Relay 只读验证"
-        default: return "官方 GPT 使用系统网络；PCL Relay 只读验证"
-        }
+    var gatewayDisplayName: String {
+        guard let host = URL(string: gatewayURL)?.host else { return gatewayURL }
+        return host
     }
 
     var allDiscoveredModels: [DiscoveredModel] {
@@ -175,7 +132,6 @@ final class AppModel: ObservableObject {
         launchAtLoginEnabled = loginItem.enabled
         launchAtLoginStatusText = loginItem.message
         refreshAll()
-        startConsensusMonitoring()
     }
 
     func refreshAll() {
@@ -195,6 +151,7 @@ final class AppModel: ObservableObject {
                    let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let enabled = payload["enabled"] as? Bool {
                     integrationEnabled = enabled
+                    integrationActive = payload["active"] as? Bool ?? false
                 }
 
                 let registryResult = try await runCLI(["models", "show"])
@@ -203,31 +160,16 @@ final class AppModel: ObservableObject {
                     registry = decoded
                     selectedAgents = Set(decoded.selectedAgents ?? AgentDefinition.all.map(\.id))
                 }
+                Task { await refreshRoutes(showBanner: false) }
+                Task { await refreshRelaySync(showBanner: false) }
+                Task { await refreshDeploymentTargets(showBanner: false) }
                 remoteServiceActive = doctor?.gateway == true
-                remoteStatusText = remoteServiceActive ? "已通过 Tailnet 健康检查" : (doctor?.gatewayError ?? "中转站不可达")
+                remoteStatusText = remoteServiceActive ? "PCL gateway endpoint 已响应" : (doctor?.gatewayError ?? "PCL gateway endpoint 不可达")
                 Task { await refreshRemoteStatus() }
-                Task { await discoverNodes(showBanner: false) }
                 Task { await refreshPortalStatus(showBanner: false) }
                 Task { await checkAppUpdate(showBanner: false) }
             } catch {
                 show("刷新失败：\(error.localizedDescription)", .error)
-            }
-        }
-    }
-
-    func startConsensusMonitoring() {
-        guard consensusMonitor == nil else { return }
-        consensusMonitor = Task { [weak self] in
-            let interval = 30.0
-            while !Task.isCancelled {
-                let now = Date().timeIntervalSince1970
-                // Endpoint probes are allowed several seconds.  Read the
-                // previous completed round after all nodes have had time to
-                // publish, rather than exposing a partially updated graph.
-                let nextRound = (floor(now / interval) + 1) * interval + 12
-                try? await Task.sleep(for: .seconds(max(1, nextRound - now)))
-                guard !Task.isCancelled, let self else { return }
-                await self.discoverNodes(showBanner: false)
             }
         }
     }
@@ -242,40 +184,24 @@ final class AppModel: ObservableObject {
         guard !didBootstrapClient else { return }
         guard let bundledCLIURL,
               FileManager.default.isExecutableFile(atPath: bundledCLIURL.path) else { return }
-        let integrationResult = try await runner.run(
+        let wasInstalled = FileManager.default.isExecutableFile(atPath: installedCLIURL.path)
+        if !localControlPlaneNeedsBootstrap() {
+            didBootstrapClient = true
+            return
+        }
+        let result = try await runner.run(
             id: UUID(),
             executable: bundledCLIURL,
-            arguments: ["integration", "status"]
+            arguments: ["sidecar", "stage"]
         )
-        if integrationResult.exitCode == 0,
-           let data = integrationResult.stdout.data(using: .utf8),
-           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           payload["enabled"] as? Bool == false {
-            integrationEnabled = false
-            didBootstrapClient = true
-            return
-        }
-        integrationEnabled = true
-        let wasInstalled = FileManager.default.isExecutableFile(atPath: installedCLIURL.path)
-        if !localClientNeedsBootstrap() {
-            didBootstrapClient = true
-            return
-        }
-        let result = try await runner.run(id: UUID(), executable: bundledCLIURL, arguments: ["install", "client"])
         guard result.exitCode == 0 else { throw commandError(result) }
         didBootstrapClient = true
-        if let data = result.stdout.data(using: .utf8),
-           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           payload["router_port_changed"] as? Bool == true {
-            codexReloadRequired = true
-            let oldPort = payload["previous_router_port"] as? Int
-            let newPort = ((payload["native_router_service"] as? [String: Any])?["port"] as? Int)
-            show("本地路由端口已从 \(oldPort.map(String.init) ?? "旧端口") 切换到 \(newPort.map(String.init) ?? "新端口")；请退出并重新打开 Codex", .info)
+        if !wasInstalled {
+            show("控制面与 OpenCodex 已暂存；当前 Codex 会话和数据面未重启", .success)
         }
-        if !wasInstalled { show("客户端已自动安装，官方 GPT 配置保持不变", .success) }
     }
 
-    private func localClientNeedsBootstrap() -> Bool {
+    private func localControlPlaneNeedsBootstrap() -> Bool {
         guard FileManager.default.isExecutableFile(atPath: installedCLIURL.path) else { return true }
         let installedVersionURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/share/pcl-codex-bridge/VERSION")
@@ -283,31 +209,13 @@ final class AppModel: ObservableObject {
         let bundledVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         guard installedVersion == bundledVersion else { return true }
 
-        let configURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/config.toml")
-        guard let config = try? String(contentsOf: configURL, encoding: .utf8),
-              config.contains("# >>> pcl-relay native router root >>>"),
-              config.contains("# >>> pcl-codex-bridge managed block >>>"),
-              let configPort = firstCapture(in: config, pattern: #"openai_base_url\s*=\s*\"http://127\.0\.0\.1:(\d+)/v1\""#) else {
-            return true
-        }
-
-        let plistURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/cn.haichen.pcl-relay-router.plist")
-        guard let data = try? Data(contentsOf: plistURL),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              let environment = plist["EnvironmentVariables"] as? [String: Any],
-              let servicePort = environment["PCL_RELAY_NATIVE_PORT"] as? String else {
-            return true
-        }
-        return configPort != servicePort
-    }
-
-    private func firstCapture(in text: String, pattern: String) -> String? {
-        guard let expression = try? NSRegularExpression(pattern: pattern),
-              let match = expression.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: text) else { return nil }
-        return String(text[range])
+        guard let bundledManifestURL = Bundle.main.resourceURL?
+                .appendingPathComponent("bridge/opencodex/UPSTREAM.json") else { return true }
+        let installedManifestURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/pcl-codex-bridge/opencodex/current/UPSTREAM.json")
+        guard let bundledManifest = try? Data(contentsOf: bundledManifestURL),
+              let installedManifest = try? Data(contentsOf: installedManifestURL) else { return true }
+        return bundledManifest != installedManifest
     }
 
     func runCLI(_ arguments: [String], id: UUID = UUID()) async throws -> CommandResult {

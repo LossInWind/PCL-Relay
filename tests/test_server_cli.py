@@ -5,6 +5,18 @@ from pcl_codex_bridge import cli
 
 
 class ServerCliTests(unittest.TestCase):
+    def test_gateway_install_rejects_shell_syntax_in_listen_host(self):
+        args = mock.MagicMock(host="127.0.0.1 $(touch bad)", admin_cidrs="127.0.0.0/8")
+        with mock.patch("pcl_codex_bridge.cli.sys.platform", "linux"):
+            with self.assertRaisesRegex(RuntimeError, "explicit IP address or hostname"):
+                cli.install_gateway(args)
+
+    def test_gateway_install_rejects_invalid_admin_cidr(self):
+        args = mock.MagicMock(host="127.0.0.1", admin_cidrs="not-a-network")
+        with mock.patch("pcl_codex_bridge.cli.sys.platform", "linux"):
+            with self.assertRaisesRegex(RuntimeError, "Invalid gateway admin CIDR"):
+                cli.install_gateway(args)
+
     def test_status_uses_tailnet_admin_endpoint(self):
         with mock.patch("pcl_codex_bridge.cli.request_json", return_value={"status": "active"}) as request:
             value = cli.server_status("http://relay.tailnet:15722/v1")

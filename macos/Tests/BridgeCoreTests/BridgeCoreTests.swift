@@ -18,13 +18,13 @@ final class BridgeCoreTests: XCTestCase {
     }
 
     func testDecodesDoctorWithoutCredentialMaterial() throws {
-        let json = #"{"gateway":true,"tailscale":true,"codex":true,"config_managed":true,"profile":true,"catalog":true,"registry":true,"unsandboxed_fallback":false,"official_route_reachable":true,"official_route_http_status":401,"official_route_latency_ms":82,"official_route_error":"","official_proxy_source":"haichen-services"}"#
+        let json = #"{"gateway":true,"tailscale":false,"codex":true,"config_managed":true,"profile":true,"catalog":true,"registry":true,"unsandboxed_fallback":false,"official_route_reachable":false,"official_route_http_status":0,"official_route_latency_ms":0,"official_route_error":"not_owned_by_pcl_relay","official_proxy_source":"external_network_owner"}"#
         let doctor = try BridgeDecode.value(DoctorStatus.self, from: json)
         XCTAssertTrue(doctor.gateway)
         XCTAssertFalse(doctor.unsandboxedFallback)
-        XCTAssertTrue(doctor.officialRouteReachable == true)
-        XCTAssertEqual(doctor.officialRouteHTTPStatus, 401)
-        XCTAssertEqual(doctor.officialProxySource, "haichen-services")
+        XCTAssertTrue(doctor.officialRouteReachable == false)
+        XCTAssertEqual(doctor.officialRouteHTTPStatus, 0)
+        XCTAssertEqual(doctor.officialProxySource, "external_network_owner")
     }
 
     func testDecodesDiscoveredModelDetails() throws {
@@ -68,5 +68,35 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertTrue(status.updateAvailable)
         XCTAssertEqual(status.latestVersion, "2.2.0")
         XCTAssertEqual(status.assetName, "PCL-Relay-macOS.zip")
+    }
+
+    func testDecodesGatewayRouteCatalog() throws {
+        let json = #"{"selected_gateway":"http://relay-a:15722/v1","count":2,"network_managed":false,"gateways":[{"id":"a","name":"Relay A","url":"http://relay-a:15722/v1","added_at":"","selected":true,"healthy":true,"model_count":13,"latency_ms":42,"error":""},{"id":"b","name":"Relay B","url":"http://relay-b:15722/v1","added_at":"","selected":false,"healthy":false,"model_count":null,"latency_ms":null,"error":"timeout"}]}"#
+        let catalog = try BridgeDecode.value(GatewayRouteCatalog.self, from: json)
+        XCTAssertEqual(catalog.count, 2)
+        XCTAssertEqual(catalog.gateways.first?.modelCount, 13)
+        XCTAssertFalse(catalog.networkManaged)
+    }
+
+    func testDecodesRelaySyncHeartbeatCatalog() throws {
+        let json = #"{"protocol":"pcl-relay-topology/1","node_id":"local","node_name":"mac","revision":{"counter":4,"origin":"local"},"digest":"abc","count":1,"network_managed":false,"peers":[{"id":"linux","name":"server","url":"http://server:15726","online":true,"latency_ms":18,"error":"","version":"2.5.5","digest":"def","revision":{"counter":4,"origin":"local"}}]}"#
+        let catalog = try BridgeDecode.value(RelaySyncCatalog.self, from: json)
+        XCTAssertEqual(catalog.protocolName, "pcl-relay-topology/1")
+        XCTAssertEqual(catalog.peers.first?.latencyMS, 18)
+        XCTAssertFalse(catalog.networkManaged)
+    }
+
+    func testDecodesRelaySyncServiceStatus() throws {
+        let json = #"{"installed":true,"active":true,"host":"127.0.0.1","port":15726,"error":"","model_data_plane_restarted":false}"#
+        let status = try BridgeDecode.value(RelaySyncServiceStatus.self, from: json)
+        XCTAssertTrue(status.active)
+        XCTAssertFalse(status.modelDataPlaneRestarted)
+    }
+
+    func testDecodesOpenCodexProxyPolicy() throws {
+        let json = #"{"proxy":"http://127.0.0.1:7890","no_proxy":["localhost","relay.internal"],"configured":true,"implementation":"upstream-opencodex","automatic_discovery":false,"network_managed":false}"#
+        let policy = try BridgeDecode.value(OpenCodexProxyPolicy.self, from: json)
+        XCTAssertEqual(policy.noProxy, ["localhost", "relay.internal"])
+        XCTAssertFalse(policy.automaticDiscovery)
     }
 }

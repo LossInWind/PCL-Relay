@@ -180,22 +180,3 @@ struct QuietButtonStyle: ButtonStyle {
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
-
-func shortDeviceName(_ value: String) -> String {
-    value.replacingOccurrences(of: "haichen-", with: "")
-}
-
-func routeDisplayName(_ route: String) -> String {
-    switch route {
-    case "direct": return "中转站直连"
-    case "local_pcl_direct": return "PCL 本机直连"
-    case "bridge_via_local_mac": return "经 Mac 桥接"
-    default: return "尚未接入"
-    }
-}
-
-func deviceSymbol(_ node: RelayCandidate) -> String {
-    if node.isSelf || node.clientStatus?.system == "Darwin" { return "laptopcomputer" }
-    if node.selected || node.feasibility?.relayCapable == true { return "server.rack" }
-    return "shippingbox.fill"
-}

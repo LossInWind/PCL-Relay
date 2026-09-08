@@ -17,8 +17,6 @@ from pcl_codex_bridge.gateway import (
     portal_pac,
     portal_target_allowed,
     recent_logs,
-    record_topology_heartbeat,
-    topology_snapshot,
     iter_chat_completion_resilient,
     open_chat_completion_resilient,
 )
@@ -702,51 +700,15 @@ class GatewayMappingTests(unittest.TestCase):
 
     def test_gateway_status_exposes_only_allowlisted_admin_scope(self):
         with (
-            mock.patch("pcl_codex_bridge.gateway.tailnet_node", return_value={
-                "HostName": "haichen-pcl-linux-3070ti",
-                "DNSName": "haichen-pcl-linux-3070ti.example.ts.net.",
-                "TailscaleIPs": ["100.113.234.58"],
-            }),
+            mock.patch("pcl_codex_bridge.gateway.socket.gethostname", return_value="relay-host"),
             mock.patch("pcl_codex_bridge.gateway.os.getpid", return_value=42),
         ):
             status = gateway_status()
-        self.assertEqual(status["node_name"], "haichen-pcl-linux-3070ti")
+        self.assertEqual(status["node_name"], "relay-host")
+        self.assertEqual(status["listen_host"], "127.0.0.1")
         self.assertEqual(status["pid"], 42)
-        self.assertEqual(status["admin_scope"], ["status", "logs", "restart_self", "portal_proxy", "topology_consensus"])
+        self.assertEqual(status["admin_scope"], ["status", "logs", "restart_self", "portal_proxy"])
         self.assertNotIn("key_file", status)
-
-    def test_topology_heartbeat_is_sanitized_and_shared(self):
-        from pcl_codex_bridge import gateway
-
-        with gateway.TOPOLOGY_LOCK:
-            gateway.TOPOLOGY_REPORTS.clear()
-        report = record_topology_heartbeat(
-            {
-                "node_id": "100.64.0.11",
-                "node_name": "peer-mac",
-                "client_version": "2.3.3",
-                "pcl_direct": False,
-                "relay_reachable": True,
-                "round_id": 42,
-                "api_key": "must-not-be-stored",
-            },
-            "100.64.0.11",
-        )
-        self.assertNotIn("api_key", report)
-        snapshot = topology_snapshot()
-        self.assertEqual(snapshot["service"], "pcl-relay-topology-consensus")
-        self.assertEqual(snapshot["reports"][0]["node_id"], "100.64.0.11")
-        self.assertEqual(snapshot["reports"][0]["round_id"], 42)
-        record_topology_heartbeat(
-            {
-                "node_id": "100.64.0.11",
-                "node_name": "peer-mac",
-                "round_id": 43,
-            },
-            "100.64.0.11",
-        )
-        snapshot = topology_snapshot()
-        self.assertEqual([item["round_id"] for item in snapshot["reports"]], [42, 43])
 
     def test_portal_proxy_only_allows_pcl_https_domains(self):
         self.assertTrue(portal_target_allowed("llmapi.pcl.ac.cn", 443))

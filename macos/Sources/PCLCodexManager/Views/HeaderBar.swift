@@ -18,7 +18,7 @@ struct HeaderBar: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("PCL Relay")
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    Text("Tailnet LLM Gateway")
+                    Text("Codex Model Router")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -55,9 +55,9 @@ struct HeaderBar: View {
             .disabled(model.isTogglingIntegration)
 
             StatusPill(
-                title: model.networkStatusTitle,
-                active: model.networkReady,
-                symbol: model.networkReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+                title: model.routeStatusTitle,
+                active: model.routeReady,
+                symbol: model.routeReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
             )
             Button {
                 model.refreshAll()

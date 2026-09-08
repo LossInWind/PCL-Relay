@@ -44,7 +44,7 @@ class RelayDiscoveryTests(unittest.TestCase):
         self.assertTrue(relay["selected"])
         self.assertEqual(result["ready_count"], 1)
 
-    def test_select_relay_updates_only_managed_codex_block(self):
+    def test_select_gateway_saves_endpoint_without_touching_codex(self):
         registry = {"gateway": "http://old.tail.test:15722/v1", "models": {}}
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"
@@ -66,13 +66,11 @@ class RelayDiscoveryTests(unittest.TestCase):
                 result = select_relay("http://new.tail.test:15722/v1")
             updated = config.read_text(encoding="utf-8")
             updated_registry = json.loads(registry_file.read_text(encoding="utf-8"))
-        self.assertIn('model = "gpt-5.6-sol"', updated)
-        self.assertIn('model_provider = "pcl_relay_official"', updated)
-        self.assertIn('openai_base_url = "http://127.0.0.1:15724/v1"', updated)
-        self.assertIn('PCL_CODEX_GATEWAY_URL = "http://new.tail.test:15722/v1"', updated)
-        self.assertNotIn('[model_providers.pcl_internal]', updated)
+        self.assertEqual(updated, 'model = "gpt-5.6-sol"\nmodel_provider = "openai"\n')
         self.assertEqual(updated_registry["gateway"], "http://new.tail.test:15722/v1")
         self.assertTrue(result["main_provider_preserved"])
+        self.assertTrue(result["sidecar_prepare_required"])
+        self.assertFalse(result["codex_reload_required"])
 
     def test_no_proxy_tracks_selected_gateway(self):
         block = managed_block("http://another.tail.test:15722/v1", "/usr/bin/python3")

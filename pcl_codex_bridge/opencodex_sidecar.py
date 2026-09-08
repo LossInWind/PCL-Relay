@@ -821,8 +821,15 @@ def prepare_sidecar(
         runner=runner,
     )
     service_started = not bool(before.get("ok"))
+    startup_mechanism = "existing"
     if service_started:
-        _run_checked(runner, runtime, ["service", "install"], config_home, 90)
+        status = _run_json(runner, runtime, ["status", "--json"], config_home, 30)
+        startup = status.get("startup") or {}
+        # Pods have no user systemd. Use upstream's detached process owner,
+        # not a new custom supervisor and never a privileged host service.
+        unsupported = startup.get("serviceSupported") is False
+        startup_mechanism = "upstream-ensure" if unsupported else "upstream-service"
+        _run_checked(runner, runtime, ["ensure"] if unsupported else ["service", "install"], config_home, 90)
     ready = require_sidecar_ready(
         runtime,
         expected_port,
@@ -835,6 +842,8 @@ def prepare_sidecar(
         "ready": True,
         "pid": ready.get("pid"),
         "service_started": service_started,
+        "startup_mechanism": startup_mechanism,
+        "reboot_safe": (startup_mechanism == "upstream-service") if service_started else None,
         "codex_integration_enabled": False,
     }
 

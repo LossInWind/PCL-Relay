@@ -424,6 +424,26 @@ class OpenCodexSidecarTests(unittest.TestCase):
         self.assertIn(["restart"], commands)
         self.assertFalse(marker_exists)
 
+    def test_pod_uses_upstream_detached_owner_without_system_service(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))
+            commands = []
+            def runner(_runtime, arguments, _home, _timeout):
+                commands.append(list(arguments))
+                value = {"ok": True}
+                if arguments == ["health", "--json"]:
+                    value = {"ok": False}
+                elif arguments == ["status", "--json"]:
+                    value = {"startup": {"serviceSupported": False}}
+                elif arguments[0] == "ready":
+                    value = {"ready": True, "pid": 42, "port": 15725}
+                return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(value), stderr="")
+            result = prepare_sidecar(runtime, "http://relay.example:15722/v1", ["GLM-5.2"],
+                                     config_home=Path(temp) / "config", runner=runner)
+            self.assertIn(["ensure"], commands)
+            self.assertNotIn(["service", "install"], commands)
+            self.assertFalse(result["reboot_safe"])
+
     def test_prepare_reuses_a_healthy_sidecar_without_restart(self):
         with tempfile.TemporaryDirectory() as temp:
             runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))

@@ -92,7 +92,13 @@ extension AppModel {
         Task {
             defer { isSavingAgents = false }
             while let desired = agentSelection.takeNext() {
-                let ordered = agentOptions.filter { desired.contains($0.id) }.map { option in
+                let options = agentOptions.filter { desired.contains($0.id) }
+                guard Set(options.map(\.id)) == desired else {
+                    agentSelection.fail(desired)
+                    agentSaveMessage = "保存未确认：部分已选模型缺少定义；未写入配置，请刷新目录后重试"
+                    return
+                }
+                let ordered = options.map { option in
                     registry?.availableModels?[option.model] != nil ? option.model : option.id
                 }
                 do {

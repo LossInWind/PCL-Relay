@@ -122,4 +122,37 @@ final class ReliabilityTests: XCTestCase {
         pending?.resume()
         await waitUntil { !model.isInstallingIntegration }
     }
+
+    func testCatalogShrinkPreservesSelectedCustomAgentDuringSave() async throws {
+        let model = AppModel()
+        let data = #"{"models":{},"catalog_checked_at":"2026-09-08","available_models":{},"selected_agents":["custom_agent","pcl_kimi"],"agent_definitions":{"custom_agent":{"model":"Custom-Model","description":"Saved model"}}}"#
+        model.registry = try BridgeDecode.value(ModelRegistry.self, from: data)
+        model.selectedAgents = ["custom_agent", "pcl_kimi"]
+        XCTAssertEqual(Set(model.allDiscoveredModels.map(\.alias)), ["custom_agent", "pcl_kimi"])
+        XCTAssertNotNil(model.catalogWarning(for: "Custom-Model"))
+        var stored = Set<String>()
+        model.commandOverride = { args in
+            if args.prefix(2) == ["models", "select"] { stored = Set(args.dropFirst(2)) }
+            return CommandResult(stdout: self.registry(stored), stderr: "", exitCode: 0)
+        }
+        model.setAgent("pcl_glm", enabled: true)
+        await waitUntil { !model.isSavingAgents }
+        XCTAssertEqual(stored, ["custom_agent", "pcl_kimi", "pcl_glm"])
+        XCTAssertNil(model.agentSelection.failed)
+    }
+
+    func testUnknownSavedAliasCannotBeSilentlyDropped() async {
+        let model = AppModel()
+        model.selectedAgents = ["missing_definition"]
+        var writes = 0
+        model.commandOverride = { _ in
+            writes += 1
+            return CommandResult(stdout: "", stderr: "", exitCode: 0)
+        }
+        model.setAgent("pcl_glm", enabled: true)
+        await waitUntil { !model.isSavingAgents }
+        XCTAssertEqual(writes, 0)
+        XCTAssertEqual(model.selectedAgents, ["missing_definition"])
+        XCTAssertNotNil(model.agentSelection.failed)
+    }
 }

@@ -116,11 +116,29 @@ final class AppModel: ObservableObject {
     }
 
     var allDiscoveredModels: [DiscoveredModel] {
-        (registry?.availableModels?.values.map { $0 } ?? []).sorted {
+        var records = registry?.availableModels ?? [:]
+        // Discovery is not authorization to remove a saved model. Keep configured
+        // identities visible and serializable even when the upstream catalog shrinks.
+        for (alias, record) in registry?.agentDefinitions ?? [:] where records[record.model] == nil {
+            records[record.model] = DiscoveredModel(id: record.model, alias: alias, family: "PCL",
+                category: "chat", description: record.description, agentEligible: true,
+                recommended: false, ownedBy: "", inputModalities: [])
+        }
+        for agent in AgentDefinition.all where selectedAgents.contains(agent.id) && records[agent.model] == nil {
+            records[agent.model] = DiscoveredModel(id: agent.model, alias: agent.id, family: agent.family,
+                category: agent.category, description: agent.detail, agentEligible: true,
+                recommended: agent.recommended, ownedBy: "", inputModalities: [])
+        }
+        return records.values.sorted {
             if $0.agentEligible != $1.agentEligible { return $0.agentEligible && !$1.agentEligible }
             if $0.recommended != $1.recommended { return $0.recommended && !$1.recommended }
             return $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending
         }
+    }
+
+    func catalogWarning(for modelID: String) -> String? {
+        guard registry?.catalogCheckedAt != nil, registry?.availableModels?[modelID] == nil else { return nil }
+        return "最新目录未列出 · 已保留配置，当前调用能力待确认"
     }
 
     var agentOptions: [AgentDefinition] {

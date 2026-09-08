@@ -86,6 +86,9 @@ struct ModelsAgentsView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(item.id).font(.subheadline.weight(.semibold)).textSelection(.enabled)
                 Text("\(item.family) · \(categoryName(item.category))").font(.caption).foregroundStyle(.secondary)
+                if let warning = model.catalogWarning(for: item.id) {
+                    Text(warning).font(.caption).foregroundStyle(.orange)
+                }
                 if item.agentEligible {
                     Text(capabilityTitle(status) + (status == nil ? "" : " · " + (model.registry?.checkedAt ?? "检测时间未知")))
                         .font(.caption).foregroundStyle(.secondary)

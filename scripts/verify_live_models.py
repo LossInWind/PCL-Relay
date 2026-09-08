@@ -9,7 +9,11 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.error
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pcl_codex_bridge.http_client import safe_http_error
 
 
 def isolated_server(port, gateway_url):
@@ -72,7 +76,11 @@ def post(base, path, body):
         data=json.dumps(body).encode(),
         headers={'Content-Type': 'application/json'},
     )
-    with opener.open(request, timeout=180) as response:
+    try:
+        response = opener.open(request, timeout=180)
+    except urllib.error.HTTPError as exc:
+        raise safe_http_error(exc) from None
+    with response:
         if 'text/event-stream' not in response.headers.get('Content-Type', ''):
             return json.load(response)
         for line in response:
@@ -103,7 +111,7 @@ def verify(base, model, compaction_version=1):
         result['checks']['stream_text'] = 'LIVE_OK' in text
         compact_request = {
             'model': model,
-            'input': [{'role': 'user', 'content': 'Remember checkpoint PCL_CHECKPOINT_927. No files changed.'}],
+            'input': [{'role': 'user', 'content': 'This is a bounded tool verification task. Remember checkpoint PCL_CHECKPOINT_927. Next, write that checkpoint using write_note, then acknowledge the verified tool result. No files changed yet.'}],
         }
         if compaction_version == 2:
             compact_request.update(stream=True, max_output_tokens=4096)
@@ -151,6 +159,9 @@ def verify(base, model, compaction_version=1):
         inputs += response['output'] + [{
             'type': 'function_call_output', 'call_id': calls[0]['call_id'],
             'output': 'Note written and verified successfully.',
+        }, {
+            'role': 'user',
+            'content': 'The verification task is complete: the tool has written and verified the checkpoint. No further task or clarification is needed. Acknowledge this successful tool result by replying only TOOL_ROUNDTRIP_OK.',
         }]
         final = post(base, '/responses', {
             'model': model, 'stream': True, 'max_output_tokens': 8192,

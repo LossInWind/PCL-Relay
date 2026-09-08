@@ -80,6 +80,13 @@ public struct DiscoveredModel: Codable, Equatable, Sendable, Identifiable {
     public let ownedBy: String
     public let inputModalities: [String]
 
+    public init(id: String, alias: String, family: String, category: String, description: String,
+                agentEligible: Bool, recommended: Bool, ownedBy: String, inputModalities: [String]) {
+        self.id = id; self.alias = alias; self.family = family; self.category = category
+        self.description = description; self.agentEligible = agentEligible
+        self.recommended = recommended; self.ownedBy = ownedBy; self.inputModalities = inputModalities
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, alias, family, category, description, recommended
         case agentEligible = "agent_eligible"

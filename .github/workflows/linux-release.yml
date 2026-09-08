@@ -1,0 +1,61 @@
+name: Build Linux release packages
+on:
+  workflow_dispatch:
+  push:
+    branches: [opencodex-sidecar]
+permissions:
+  contents: write
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+            build_sha: 2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452
+            runtime_sha: 951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            build_sha: 4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e
+            runtime_sha: a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packaging dependencies
+        run: sudo apt-get update && sudo apt-get install -y rsync unzip
+      - name: Fetch and verify pinned Bun runtimes
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_SHA: ${{ matrix.build_sha }}
+          RUNTIME_SHA: ${{ matrix.runtime_sha }}
+        run: |
+          mkdir -p .build/bun-build .build/bun-runtime
+          curl --fail --location --retry 3 "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-$ARCH.zip" -o .build/bun-build.zip
+          curl --fail --location --retry 3 "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-$ARCH.zip" -o .build/bun-runtime.zip
+          echo "$BUILD_SHA  .build/bun-build.zip" | sha256sum --check
+          echo "$RUNTIME_SHA  .build/bun-runtime.zip" | sha256sum --check
+          unzip -q .build/bun-build.zip -d .build/bun-build
+          unzip -q .build/bun-runtime.zip -d .build/bun-runtime
+          echo "PCL_OPENCODEX_BUN=$PWD/.build/bun-build/bun-linux-$ARCH/bun" >> "$GITHUB_ENV"
+          echo "PCL_OPENCODEX_RUNTIME_BUN=$PWD/.build/bun-runtime/bun-linux-$ARCH/bun" >> "$GITHUB_ENV"
+      - name: Build package and verify installed entry point
+        run: |
+          ./scripts/build_linux_bundle.sh
+          mkdir -p .build/verify-package
+          tar -xzf dist/PCL-Relay-linux-*.tar.gz -C .build/verify-package
+          .build/verify-package/PCL-Relay-linux-*/pcl-codex --help
+          cd dist && sha256sum --check *.sha256
+      - name: Upload to existing draft only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(tr -d '[:space:]' < pcl_codex_bridge/VERSION)"
+          test "$(gh release view "v$VERSION" --json isDraft --jq .isDraft)" = true
+          gh release upload "v$VERSION" dist/PCL-Relay-linux-* --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/PCL-Relay-linux-*
+          retention-days: 7

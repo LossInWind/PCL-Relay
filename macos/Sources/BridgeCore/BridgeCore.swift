@@ -500,6 +500,7 @@ public struct RelaySyncRevision: Codable, Equatable, Sendable {
 }
 
 public struct RelaySyncPeer: Codable, Equatable, Sendable, Identifiable {
+    public var runtime: RoutingRuntime? = nil
     public let id: String
     public let name: String
     public let url: String
@@ -509,10 +510,12 @@ public struct RelaySyncPeer: Codable, Equatable, Sendable, Identifiable {
     public let version: String?
     public let digest: String?
     public let revision: RelaySyncRevision?
+    public var nodeID: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, name, url, online, error, version, digest, revision
+        case id, name, url, online, error, version, digest, revision, runtime
         case latencyMS = "latency_ms"
+        case nodeID = "node_id"
     }
 }
 
@@ -550,6 +553,7 @@ public struct RelaySyncServiceStatus: Codable, Equatable, Sendable {
 }
 
 public struct DeploymentTarget: Codable, Equatable, Sendable, Identifiable {
+    public var runtime: RoutingRuntime? = nil
     public let id: String
     public let name: String
     public let sshTarget: String
@@ -568,7 +572,7 @@ public struct DeploymentTarget: Codable, Equatable, Sendable, Identifiable {
     public let receiverError: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, ssh, system, architecture, version, installed, error
+        case id, name, ssh, system, architecture, version, installed, error, runtime
         case sshTarget = "ssh_target"
         case controlURL = "control_url"
         case addedAt = "added_at"

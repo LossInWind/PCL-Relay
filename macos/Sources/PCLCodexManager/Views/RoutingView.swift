@@ -6,297 +6,59 @@ struct RoutingView: View {
     @State private var showAddGateway = false
     @State private var showAddPeer = false
     @State private var showSyncService = false
-    @State private var showAddDeploymentTarget = false
-
-    private var selectedRoute: GatewayRouteRecord? {
-        guard let selected = model.selectedGatewayID else { return nil }
-        return model.gatewayRoutes?.gateways.first { $0.id == selected }
-    }
+    @State private var showAddDevice = false
+    @State private var showAdvanced = false
+    @State private var showUpgrade = false
 
     var body: some View {
         ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                RoutingOverview(onUpgrade: { showUpgrade = true })
+                RelayTopologyCanvas()
+                RoutingDeviceList(onAdd: { showAddDevice = true })
+                DisclosureGroup("高级设置", isExpanded: $showAdvanced) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Button("准备本机组件") { Task { await model.prepareLocalComponents() } }
+                                .disabled(model.isPreparingLocalComponents)
+                            Button("添加中转站") { showAddGateway = true }
+                            Button("添加同步节点") { showAddPeer = true }
+                            Button("立即同步配置") { Task { await model.synchronizeRelayTopology() } }
+                                .disabled(model.isSynchronizing)
+                            Button("心跳服务设置") { showSyncService = true }
+                            if model.relaySyncService?.active == true {
+                                Button("停止本机心跳") { Task { _ = await model.setRelaySyncServiceEnabled(false) } }
+                                    .disabled(model.isTogglingSyncService)
+                            }
+                        }
+                        OpenCodexProxyCard()
+                        Text("Relay 只管理模型接入与软件更新，不修改 SSH、VPN、端口转发或文件挂载。检查不会应用路由或重启模型服务。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(.top, 12)
+                }.font(.subheadline)
+            }.padding(24)
+        }
+        .sheet(isPresented: $showAddGateway) { AddGatewaySheet(isPresented: $showAddGateway).environmentObject(model) }
+        .sheet(isPresented: $showAddPeer) { AddRelayPeerSheet(isPresented: $showAddPeer).environmentObject(model) }
+        .sheet(isPresented: $showSyncService) { ConfigureRelaySyncServiceSheet(isPresented: $showSyncService).environmentObject(model) }
+        .sheet(isPresented: $showAddDevice) { AddDeploymentTargetSheet(isPresented: $showAddDevice).environmentObject(model) }
+        .sheet(isPresented: $showUpgrade) {
             VStack(alignment: .leading, spacing: 18) {
-                SectionHeader(
-                    title: "模型路由拓扑",
-                    subtitle: "实线表示模型数据流，虚线表示 Relay 同步与软件部署控制流；底层网络仍由外部基础设施负责"
-                )
-                routingGraph
-                routeInspector
-                OpenCodexProxyCard()
-                syncGraph
-                deploymentGraph
-                responsibilityNote
+                Text("统一升级").font(.title2.weight(.semibold))
+                Text("先检查发布版本，再更新已接入设备。安装成功不代表后台已切换版本；返回设备列表检查运行版本。离线设备不计完成。")
+                    .foregroundStyle(.secondary)
                 LocalReleaseUpdateStrip()
-            }
-            .padding(22)
-        }
-        .sheet(isPresented: $showAddGateway) {
-            AddGatewaySheet(isPresented: $showAddGateway).environmentObject(model)
-        }
-        .sheet(isPresented: $showAddPeer) {
-            AddRelayPeerSheet(isPresented: $showAddPeer).environmentObject(model)
-        }
-        .sheet(isPresented: $showSyncService) {
-            ConfigureRelaySyncServiceSheet(isPresented: $showSyncService).environmentObject(model)
-        }
-        .sheet(isPresented: $showAddDeploymentTarget) {
-            AddDeploymentTargetSheet(isPresented: $showAddDeploymentTarget).environmentObject(model)
-        }
-    }
-
-    private var routingGraph: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Label("节点—边逻辑拓扑", systemImage: "point.3.filled.connected.trianglepath.dotted").font(.headline)
-                    Spacer()
-                    Button { Task { await model.refreshRoutes() } } label: {
-                        Label(model.isRefreshingRoutes ? "检查中" : "协议检查", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(QuietButtonStyle()).disabled(model.isRefreshingRoutes)
-                    Button { showAddGateway = true } label: { Label("添加中转站", systemImage: "plus") }
-                        .buttonStyle(SecondaryButtonStyle())
-                }
-                RelayTopologyCanvas().environmentObject(model)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var routeInspector: some View {
-        if let route = selectedRoute {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(route.name).font(.headline)
-                    Text(route.url).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-                Spacer()
-                if !route.selected {
-                    Button("移除") { Task { await model.removeGatewayRoute(route) } }.buttonStyle(QuietButtonStyle())
-                    Button(model.isSwitchingGateway ? "切换中" : "设为当前中转站") {
-                        Task { await model.selectGatewayRoute(route) }
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(model.isSwitchingGateway || route.healthy == false)
-                } else {
-                    Label("pcl/* 当前使用", systemImage: "checkmark.circle.fill")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.green)
-                }
-            }
-            .padding(.horizontal, 16).padding(.vertical, 13)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.62), in: RoundedRectangle(cornerRadius: 15))
-            .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.white.opacity(0.065)))
-        }
-    }
-
-    private var syncGraph: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 15) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Relay 多端同步").font(.headline)
-                        Text("pcl-relay-topology/1 · 心跳与状态同步不承载模型流量")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button(model.relaySyncService?.active == true ? "停止本机心跳" : "配置本机心跳") {
-                        if model.relaySyncService?.active == true {
-                            Task { _ = await model.setRelaySyncServiceEnabled(false) }
-                        } else {
-                            showSyncService = true
-                        }
-                    }
-                    .buttonStyle(QuietButtonStyle()).disabled(model.isTogglingSyncService)
-                    Button { Task { await model.refreshRelaySync() } } label: {
-                        Label("心跳", systemImage: "waveform.path.ecg")
-                    }
-                    .buttonStyle(QuietButtonStyle()).disabled(model.isRefreshingSync)
-                    Button { Task { await model.synchronizeRelayTopology() } } label: {
-                        Label(model.isSynchronizing ? "同步中" : "立即同步", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .buttonStyle(SecondaryButtonStyle()).disabled(model.isSynchronizing)
-                    Button { showAddPeer = true } label: { Label("添加节点", systemImage: "plus") }
-                        .buttonStyle(SecondaryButtonStyle())
-                }
-                HStack(spacing: 10) {
-                    RelayPeerNode(
-                        name: model.relaySync?.nodeName ?? "当前设备",
-                        detail: "本机 · r\(model.relaySync?.revision.counter ?? 0)",
-                        online: true,
-                        current: true
-                    )
-                    if !(model.relaySync?.peers.isEmpty ?? true) { FlowArrow() }
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(model.relaySync?.peers ?? []) { peer in
-                                VStack(spacing: 5) {
-                                    RelayPeerNode(
-                                        name: peer.name,
-                                        detail: peer.online == true ? "\(peer.latencyMS ?? 0) ms · r\(peer.revision?.counter ?? 0)" : "心跳不可达",
-                                        online: peer.online == true,
-                                        current: false
-                                    )
-                                    Button("移除") { Task { await model.removeRelaySyncPeer(peer) } }
-                                        .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
-                                }
-                            }
-                        }
+                Button(model.isDeployingTopology ? "安装接入中…" : "安装 / 接入登记设备") {
+                    model.deployLatestToRegisteredTargets()
+                }.disabled(model.isDeployingTopology || model.releaseUpdate?.topologyDeploymentReady != true)
+                if !model.commandLog.isEmpty {
+                    DisclosureGroup("最近操作详情") {
+                        ScrollView { Text(model.commandLog).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 220)
                     }
                 }
-            }
+                HStack { Spacer(); Button("返回") { showUpgrade = false }.keyboardShortcut(.cancelAction) }
+            }.padding(24).frame(minWidth: 650)
         }
-    }
-
-    private var deploymentGraph: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("首次安装与拓扑接入").font(.headline)
-                        Text("只操作你明确登记的 SSH 别名；不扫描 Tailnet，不同步 SSH 配置或密钥")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button { Task { await model.refreshDeploymentTargets() } } label: {
-                        Label(model.isRefreshingDeploymentTargets ? "检查中" : "检查节点", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(QuietButtonStyle()).disabled(model.isRefreshingDeploymentTargets || model.isDeployingTopology)
-                    Button { Task { await model.importDeploymentTargetsFromSSH() } } label: {
-                        Label(model.isAddingDeploymentTarget ? "导入中" : "从 SSH 配置导入", systemImage: "square.and.arrow.down")
-                    }
-                    .buttonStyle(QuietButtonStyle()).disabled(model.isAddingDeploymentTarget || model.isDeployingTopology)
-                    Button { showAddDeploymentTarget = true } label: {
-                        Label("登记安装节点", systemImage: "plus")
-                    }
-                    .buttonStyle(SecondaryButtonStyle()).disabled(model.isDeployingTopology)
-                    Button(model.isDeployingTopology ? "正在部署" : "一键安装/接入全部") {
-                        model.deployLatestToRegisteredTargets()
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(
-                        model.isDeployingTopology
-                        || (model.deploymentTargets?.count ?? 0) == 0
-                        || model.releaseUpdate?.topologyDeploymentReady != true
-                    )
-                }
-
-                if model.releaseUpdate?.localNewerThanPublished == true {
-                    Label(
-                        "本机 \(localAppVersion) 尚未发布齐三个平台资产（GitHub 当前 \(model.releaseUpdate?.latestVersion ?? "未知")），为避免安装旧版，已暂停全网部署。",
-                        systemImage: "exclamationmark.shield"
-                    )
-                    .font(.caption).foregroundStyle(.orange)
-                }
-
-                if let targets = model.deploymentTargets?.targets, !targets.isEmpty {
-                    ForEach(targets) { target in
-                        HStack(spacing: 12) {
-                            Circle()
-                                .fill(target.receiverOnline == true ? Color.green : (target.ssh == true ? Color.blue : Color.orange))
-                                .frame(width: 9, height: 9)
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 7) {
-                                    Text(target.name).font(.subheadline.weight(.semibold))
-                                    Text(target.system.map { "\($0) \(target.architecture ?? "")" } ?? "尚未检查")
-                                        .font(.caption2.monospaced()).foregroundStyle(.secondary)
-                                }
-                                Text("\(target.sshTarget)  →  \(target.controlURL)")
-                                    .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                            }
-                            Spacer()
-                            Text(deploymentState(target))
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(target.receiverOnline == true ? .green : (target.ssh == true ? .blue : .orange))
-                            Button("移除登记") { Task { await model.removeDeploymentTarget(target) } }
-                                .buttonStyle(QuietButtonStyle()).disabled(model.isDeployingTopology)
-                        }
-                        .padding(.horizontal, 13).padding(.vertical, 10)
-                        .background(Color.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 11))
-                    }
-                } else {
-                    HStack(spacing: 10) {
-                        Image(systemName: "info.circle").foregroundStyle(.blue)
-                        Text("0 个已登记节点。只需填写一个已经能登录的 SSH 别名；PCL Relay 会自动解析地址、识别 Mac/Linux 并接入 15726。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-    }
-
-    private func deploymentState(_ target: DeploymentTarget) -> String {
-        if target.receiverOnline == true {
-            return "已接入 · \(target.relayVersion ?? target.version ?? "未知版本")"
-        }
-        if target.ssh == true {
-            return target.installed == true ? "待启动接收端" : "可首次安装"
-        }
-        return "离线或 SSH 不可达"
-    }
-
-    private var localAppVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知版本"
-    }
-
-    private var responsibilityNote: some View {
-        GlassCard {
-            HStack(alignment: .top, spacing: 14) {
-                Image(systemName: "square.3.layers.3d.top.filled").font(.system(size: 22)).foregroundStyle(.blue)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("独立应用边界").font(.headline)
-                    Text("这里只保存逻辑 endpoint、模型目录、Relay 节点身份、拓扑版本与心跳结果。首次安装仅使用用户明确登记的本机 SSH alias；不读取或发布其他 App 的状态，不扫描 Tailnet，不发现代理/VPN，也不控制隧道、端口映射或文件挂载。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-}
-
-private struct GatewayTopologyNode: View {
-    let route: GatewayRouteRecord
-    let focused: Bool
-    private var tint: Color {
-        if route.selected { return .green }
-        if route.healthy == false { return .orange }
-        return .purple
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "server.rack").foregroundStyle(tint)
-                Text(route.name).font(.subheadline.weight(.semibold)).lineLimit(1)
-                if route.selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
-            }
-            Text(route.url).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
-            HStack(spacing: 7) {
-                Text(route.healthy == true ? "协议正常" : (route.healthy == false ? "协议异常" : "未检查"))
-                if let count = route.modelCount { Text("\(count) 模型") }
-                if let latency = route.latencyMS { Text("\(latency) ms") }
-            }
-            .font(.caption2.weight(.medium)).foregroundStyle(tint)
-        }
-        .padding(12).frame(width: 240, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(focused ? tint : Color.white.opacity(0.1), lineWidth: focused ? 2 : 1))
-        .contentShape(RoundedRectangle(cornerRadius: 14))
-    }
-}
-
-private struct RelayPeerNode: View {
-    let name: String
-    let detail: String
-    let online: Bool
-    let current: Bool
-    var body: some View {
-        HStack(spacing: 9) {
-            Circle().fill(online ? Color.green : Color.orange).frame(width: 9, height: 9)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.caption.weight(.semibold)).lineLimit(1)
-                Text(detail).font(.caption2.monospaced()).foregroundStyle(.secondary)
-            }
-        }
-        .padding(.horizontal, 11).padding(.vertical, 9).frame(width: 190, alignment: .leading)
-        .background((current ? Color.blue : Color.secondary).opacity(0.08), in: RoundedRectangle(cornerRadius: 11))
     }
 }
 

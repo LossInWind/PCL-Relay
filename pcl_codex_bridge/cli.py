@@ -590,6 +590,8 @@ def parser() -> argparse.ArgumentParser:
 
     routes = commands.add_parser("routes")
     route_actions = routes.add_subparsers(dest="routes_action", required=True)
+    from .runtime_snapshot import runtime_snapshot
+    route_actions.add_parser("snapshot").set_defaults(handler=lambda a: runtime_snapshot())
     route_list = route_actions.add_parser("list")
     route_list.add_argument("--probe", action="store_true")
     route_list.add_argument("--timeout", type=int, default=15)
@@ -633,7 +635,8 @@ def parser() -> argparse.ArgumentParser:
     sync_status = sync_actions.add_parser("status")
     sync_status.add_argument("--probe", action="store_true")
     sync_status.add_argument("--timeout", type=int, default=10)
-    sync_status.set_defaults(handler=lambda a: list_peers(a.probe, a.timeout))
+    sync_status.add_argument("--peer", default="")
+    sync_status.set_defaults(handler=lambda a: list_peers(a.probe, a.timeout, a.peer))
     sync_now = sync_actions.add_parser("now")
     sync_now.add_argument("--timeout", type=int, default=10)
     sync_now.set_defaults(handler=lambda a: sync_once(a.timeout))
@@ -690,7 +693,8 @@ def parser() -> argparse.ArgumentParser:
     deploy_status = deploy_actions.add_parser("status")
     deploy_status.add_argument("--probe", action="store_true")
     deploy_status.add_argument("--timeout", type=int, default=20)
-    deploy_status.set_defaults(handler=lambda a: list_targets(a.probe, a.timeout))
+    deploy_status.add_argument("--target", default="")
+    deploy_status.set_defaults(handler=lambda a: list_targets(a.probe, a.timeout, a.target))
     deploy_targets = deploy_actions.add_parser("targets")
     deploy_target_actions = deploy_targets.add_subparsers(dest="deploy_target_action", required=True)
     deploy_target_add = deploy_target_actions.add_parser("add")

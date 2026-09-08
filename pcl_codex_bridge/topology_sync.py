@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import __version__
+from .runtime_snapshot import runtime_snapshot
 from .models import DEFAULT_GATEWAY_URL, configured_agents, load_registry, save_registry
 
 
@@ -293,7 +294,7 @@ def _peer_records(registry: Dict[str, Any]) -> List[Dict[str, str]]:
     return result
 
 
-def list_peers(probe: bool = False, timeout: int = 10) -> Dict[str, Any]:
+def list_peers(probe: bool = False, timeout: int = 10, peer_id: str = "") -> Dict[str, Any]:
     registry = load_registry()
     metadata = _sync_metadata(registry)
     if registry.get("relay_sync") != metadata:
@@ -301,6 +302,8 @@ def list_peers(probe: bool = False, timeout: int = 10) -> Dict[str, Any]:
         save_registry(registry)
     peers: List[Dict[str, Any]] = []
     for peer in _peer_records(registry):
+        if peer_id and peer["id"] != peer_id:
+            continue
         record: Dict[str, Any] = {**peer, "online": None, "latency_ms": None, "error": ""}
         # Token paths are local implementation details and must never be
         # exposed through UI JSON or synchronized to another node.
@@ -310,17 +313,20 @@ def list_peers(probe: bool = False, timeout: int = 10) -> Dict[str, Any]:
                 status = heartbeat(peer["url"], token_file, timeout)
                 record.update({
                     "online": True,
-                    "id": str(status.get("node_id") or record["id"]),
+                    "node_id": str(status.get("node_id") or ""),
                     "remote_name": str(status.get("node_name") or ""),
                     "latency_ms": status.get("latency_ms"),
                     "revision": status.get("revision"),
                     "digest": str(status.get("digest") or ""),
                     "version": str(status.get("version") or ""),
+                    "runtime": status.get("runtime"),
                 })
             except Exception as exc:
                 record["online"] = False
                 record["error"] = f"{type(exc).__name__}: {exc}"
         peers.append(record)
+    if peer_id and not peers:
+        raise RuntimeError("Unknown PCL Relay sync node")
     return {
         "protocol": SYNC_PROTOCOL,
         "node_id": metadata["node_id"],
@@ -894,6 +900,7 @@ class RelaySyncHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "protocol": SYNC_PROTOCOL,
                 "version": __version__,
+                "runtime": runtime_snapshot(),
                 "node_id": envelope["node_id"],
                 "node_name": envelope["node_name"],
                 "revision": envelope["revision"],

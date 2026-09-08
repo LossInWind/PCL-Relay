@@ -50,6 +50,16 @@ final class AppModel: ObservableObject {
     @Published var isRefreshingDeploymentTargets = false
     @Published var isAddingDeploymentTarget = false
     @Published var isDeployingTopology = false
+    @Published var isCheckingRoutingDashboard = false
+    @Published var routingCheckedAt: Date?
+    @Published var routingCheckError: String?
+    @Published var routeLastSuccess: [String: Date] = [:]
+    @Published var selectedRoutingDeviceID: String?
+    @Published var deviceChecks: [String: DeploymentTarget] = [:]
+    @Published var peerChecks: [String: RelaySyncPeer] = [:]
+    @Published var isPreparingLocalComponents = false
+    @Published var routingRuntime: RoutingRuntime?
+    @Published var checkingRoutingDevices = Set<String>()
 
     let runner = CommandRunner()
     private let loginItemManager = LoginItemManager()
@@ -140,7 +150,6 @@ final class AppModel: ObservableObject {
         Task {
             defer { isRefreshing = false }
             do {
-                try await bootstrapClientIfNeeded()
                 let doctorResult = try await runCLI(["doctor"])
                 guard doctorResult.exitCode == 0 else { throw commandError(doctorResult) }
                 doctor = try BridgeDecode.value(DoctorStatus.self, from: doctorResult.stdout)
@@ -199,6 +208,16 @@ final class AppModel: ObservableObject {
         if !wasInstalled {
             show("控制面与 OpenCodex 已暂存；当前 Codex 会话和数据面未重启", .success)
         }
+    }
+
+    func prepareLocalComponents() async {
+        guard !isPreparingLocalComponents else { return }
+        isPreparingLocalComponents = true
+        defer { isPreparingLocalComponents = false }
+        do {
+            try await bootstrapClientIfNeeded()
+            show("本机组件已准备；模型服务未重启", .success)
+        } catch { show("准备本机组件失败：\(error.localizedDescription)", .error) }
     }
 
     private func localControlPlaneNeedsBootstrap() -> Bool {

@@ -228,6 +228,7 @@ def probe_target(target: Dict[str, str], timeout: int = 20) -> Dict[str, Any]:
             "receiver_online": True,
             "relay_version": str(relay.get("version") or ""),
             "relay_node_id": str(relay.get("node_id") or ""),
+            "runtime": relay.get("runtime"),
             "latency_ms": relay.get("latency_ms"),
         })
     except Exception as exc:
@@ -246,8 +247,12 @@ def probe_target(target: Dict[str, str], timeout: int = 20) -> Dict[str, Any]:
     return record
 
 
-def list_targets(probe: bool = False, timeout: int = 20) -> Dict[str, Any]:
+def list_targets(probe: bool = False, timeout: int = 20, target_id: str = "") -> Dict[str, Any]:
     targets: List[Dict[str, Any]] = _load_targets()
+    if target_id:
+        targets = [target for target in targets if target["id"] == target_id]
+        if not targets:
+            raise RuntimeError("Unknown deployment target")
     if probe and targets:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(targets))) as executor:
             targets = list(executor.map(lambda item: probe_target(item, timeout), targets))

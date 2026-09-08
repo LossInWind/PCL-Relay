@@ -11,8 +11,10 @@ extension AppModel {
             let result = try await runCLI(["deploy", "status", "--probe"])
             guard result.exitCode == 0 else { throw commandError(result) }
             deploymentTargets = try BridgeDecode.value(DeploymentTargetCatalog.self, from: result.stdout)
+            deviceChecks = [:]
             if showBanner { show("已检查明确登记的部署节点", .success) }
         } catch {
+            routingCheckError = "部分设备未能刷新；保留上次结果"
             if showBanner { show("检查部署节点失败：\(error.localizedDescription)", .error) }
         }
     }
@@ -94,7 +96,12 @@ extension AppModel {
                 if count == 0 {
                     show("还没有登记部署节点；请先添加 SSH 别名和该节点的 15726 endpoint", .info)
                 } else if succeeded == count {
-                    show("\(succeeded) 个登记节点已安装/接入；未修改 Codex 历史、凭据或网络", .success)
+                    let campaign = payload["update_campaign"] as? [String: Any]
+                    if let error = campaign?["error"] as? String {
+                        show("节点已接入，但更新未完成：\(error)", .error)
+                    } else {
+                        show("\(succeeded) 个登记节点已安装/接入；运行版本尚待逐台验证，不代表全网升级完成", .info)
+                    }
                 } else {
                     show("部署完成 \(succeeded)/\(count)；离线或失败节点请查看命令日志", .info)
                 }

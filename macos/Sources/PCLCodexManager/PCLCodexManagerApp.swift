@@ -4,6 +4,18 @@ import SwiftUI
 struct PCLCodexManagerApp: App {
     @StateObject private var model = AppModel()
 
+    init() {
+        #if DEBUG
+        if let index = CommandLine.arguments.firstIndex(of: "--render-routing-preview"),
+           CommandLine.arguments.count > index + 1 {
+            do {
+                try renderRoutingPreview(to: CommandLine.arguments[index + 1], dark: CommandLine.arguments.contains("--dark"))
+                exit(0)
+            } catch { fputs("Routing preview failed: \(error)\n", stderr); exit(1) }
+        }
+        #endif
+    }
+
     var body: some Scene {
         MenuBarExtra {
             MenuBarPanel()

@@ -12,10 +12,16 @@ extension AppModel {
             guard result.exitCode == 0 else { throw commandError(result) }
             let catalog = try BridgeDecode.value(GatewayRouteCatalog.self, from: result.stdout)
             gatewayRoutes = catalog
-            selectedGatewayID = catalog.gateways.first(where: \.selected)?.id
+            let snapshot = try await runCLI(["routes", "snapshot"])
+            if snapshot.exitCode == 0 { routingRuntime = try? BridgeDecode.value(RoutingRuntime.self, from: snapshot.stdout) }
+            if !catalog.gateways.contains(where: { $0.id == selectedGatewayID }) {
+                selectedGatewayID = catalog.gateways.first(where: \.selected)?.id
+            }
+            for route in catalog.gateways where route.healthy == true { routeLastSuccess[route.id] = Date() }
             await refreshOpenCodexProxyPolicy(showBanner: false)
             if showBanner { show("中转站拓扑已刷新", .success) }
         } catch {
+            routingCheckError = "路径检查失败；保留上次结果"
             if showBanner { show("刷新中转站失败：\(error.localizedDescription)", .error) }
         }
     }
@@ -147,12 +153,14 @@ extension AppModel {
             let result = try await runCLI(["sync", "status", "--probe"])
             guard result.exitCode == 0 else { throw commandError(result) }
             relaySync = try BridgeDecode.value(RelaySyncCatalog.self, from: result.stdout)
+            peerChecks = [:]
             let serviceResult = try await runCLI(["sync", "service", "status"])
             if serviceResult.exitCode == 0 {
                 relaySyncService = try BridgeDecode.value(RelaySyncServiceStatus.self, from: serviceResult.stdout)
             }
             if showBanner { show("Relay 心跳已刷新", .success) }
         } catch {
+            routingCheckError = "心跳检查失败；保留上次结果"
             if showBanner { show("刷新 Relay 心跳失败：\(error.localizedDescription)", .error) }
         }
     }

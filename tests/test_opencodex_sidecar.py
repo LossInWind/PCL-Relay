@@ -54,6 +54,8 @@ class OpenCodexSidecarTests(unittest.TestCase):
             with mock.patch("pcl_codex_bridge.opencodex_sidecar.subprocess.run") as run:
                 invoke_sidecar(runtime, ["service", "install"], Path(temp) / "config")
             self.assertEqual(run.call_args.kwargs["env"]["OPENCODEX_BUN_PATH"], str(runtime.bun))
+            self.assertEqual(run.call_args.kwargs["env"]["OCX_BUN_RUNTIME_PATH"], str(runtime.bun))
+            self.assertEqual(run.call_args.kwargs["env"]["OCX_BUN_RUNTIME_SOURCE"], "override")
 
     def test_provider_reload_rejection_is_not_reported_as_success(self):
         with tempfile.TemporaryDirectory() as temp:

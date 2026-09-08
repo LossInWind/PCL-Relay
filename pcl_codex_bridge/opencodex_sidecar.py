@@ -198,7 +198,11 @@ def invoke_sidecar(
         cwd=runtime.root,
         # Service installation otherwise prefers node_modules/bun (the build
         # dependency), even when the CLI itself was launched with 1.3.14.
-        env=sidecar_environment(config_home, {"OPENCODEX_BUN_PATH": str(runtime.bun)}),
+        env=sidecar_environment(config_home, {
+            "OPENCODEX_BUN_PATH": str(runtime.bun),
+            "OCX_BUN_RUNTIME_PATH": str(runtime.bun),
+            "OCX_BUN_RUNTIME_SOURCE": "override",
+        }),
         text=True,
         capture_output=True,
         timeout=timeout,

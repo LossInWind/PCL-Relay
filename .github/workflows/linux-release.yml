@@ -52,6 +52,15 @@ jobs:
           mkdir -p .build/verify-home
           HOME="$PWD/.build/verify-home" .build/verify-package/PCL-Relay-linux-*/install.sh
           HOME="$PWD/.build/verify-home" .build/verify-home/.local/bin/pcl-codex --help
+          HOME="$PWD/.build/verify-home" python3 - <<'PY'
+          import json
+          from pcl_codex_bridge.opencodex_sidecar import installed_runtime, invoke_sidecar
+          runtime = installed_runtime()
+          result = invoke_sidecar(runtime, ['--eval', 'import {durableBunRuntime} from "./src/lib/bun-runtime.ts"; console.log(JSON.stringify({version:Bun.version,runtime:durableBunRuntime()}));'])
+          value = json.loads(result.stdout)
+          assert result.returncode == 0 and value['version'] == '1.3.14'
+          assert value['runtime']['path'] == str(runtime.bun)
+          PY
           cd dist && sha256sum --check *.sha256
       - name: Upload to existing draft only
         env:

@@ -176,8 +176,12 @@ def invoke_sidecar(
     config_home: Path = OPENCODEX_CONFIG_HOME,
     timeout: int = 60,
 ) -> subprocess.CompletedProcess:
+    # Provider reload is exposed as an attested upstream library contract, not
+    # a public CLI subcommand. Execute that unchanged implementation via Bun.
+    command = ([str(runtime.bun), *arguments] if arguments and arguments[0] == "--eval"
+               else [str(runtime.bun), str(runtime.cli), *arguments])
     return subprocess.run(
-        [str(runtime.bun), str(runtime.cli), *arguments],
+        command,
         cwd=runtime.root,
         env=sidecar_environment(config_home),
         text=True,
@@ -190,6 +194,20 @@ def invoke_sidecar(
 SidecarRunner = Callable[
     [OpenCodexRuntime, Sequence[str], Path, int], subprocess.CompletedProcess
 ]
+
+
+def reload_pcl_provider(runtime: OpenCodexRuntime, config_home: Path,
+                        runner: SidecarRunner = invoke_sidecar) -> Dict[str, Any]:
+    """Adopt persisted PCL settings through upstream's process-bound reload."""
+    script = (
+        'import {findLiveProxy} from "./src/server/proxy-liveness.ts"; '
+        'import {requestBoundLocalProviderReload} from "./src/server/local-provider-reload-client.ts"; '
+        'const p=await findLiveProxy(); '
+        'const result=p ? await requestBoundLocalProviderReload(p,"pcl") : {kind:"stopped"}; '
+        'console.log(JSON.stringify(result)); '
+        'if(result.kind==="unavailable") process.exitCode=1;'
+    )
+    return _run_checked(runner, runtime, ["--eval", script], config_home, 30)
 
 
 def _run_checked(
@@ -337,10 +355,13 @@ def configure_sidecar(
         ["config", "set", "websockets", "true", "--json"],
         ["config", "set", "providers.pcl.selectedModels", json.dumps(selected), "--json"],
         ["config", "set", "providers.pcl.retainModels", json.dumps(selected), "--json"],
+        # PCL GLM can loop indefinitely on required tool choice. Use upstream's
+        # existing model-specific adapter capability; never repair JSON here.
+        ["config", "set", "providers.pcl.autoToolChoiceOnlyModels", '["GLM-5.2"]', "--json"],
         ["config", "set", "providers.openai.codexAccountMode", json.dumps("direct"), "--json"],
         ["config", "set", "defaultModelAliases", "false", "--json"],
         ["config", "set", "fastRows", "false", "--json"],
-        ["config", "set", "emptyCompletionRetry", "false", "--json"],
+        ["config", "set", "emptyCompletionRetry", "true", "--json"],
         ["config", "set", "subagentModels", json.dumps(subagents), "--json"],
         ["config", "set", "multiAgentMode", json.dumps("v2"), "--json"],
         ["config", "set", "keepNativeChatGptOnV1", "true", "--json"],
@@ -355,6 +376,7 @@ def configure_sidecar(
         _run_checked(runner, runtime, command, config_home)
         for command in commands
     ]
+    reload_result = reload_pcl_provider(runtime, config_home, runner)
     return {
         "configured": True,
         "runtime_version": runtime.version,
@@ -370,6 +392,7 @@ def configure_sidecar(
         "codex_integration_enabled": enable_codex,
         "transport_implementation": "upstream-opencodex",
         "commands": len(results),
+        "provider_reload": reload_result,
     }
 
 
@@ -401,9 +424,11 @@ def switch_pcl_gateway(
         ],
         ["config", "set", "providers.pcl.selectedModels", json.dumps(selected), "--json"],
         ["config", "set", "providers.pcl.retainModels", json.dumps(selected), "--json"],
+        ["config", "set", "providers.pcl.autoToolChoiceOnlyModels", '["GLM-5.2"]', "--json"],
         ["config", "validate", "--json"],
     ]
     results = [_run_checked(runner, runtime, command, config_home) for command in commands]
+    reload_result = reload_pcl_provider(runtime, config_home, runner)
     return {
         "configured": True,
         "provider": PCL_PROVIDER,
@@ -412,6 +437,7 @@ def switch_pcl_gateway(
         "service_restarted": False,
         "official_route_changed": False,
         "commands": len(results),
+        "provider_reload": reload_result,
     }
 
 

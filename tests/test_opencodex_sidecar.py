@@ -18,6 +18,7 @@ from pcl_codex_bridge.opencodex_sidecar import (
     deactivate_sidecar,
     prepare_sidecar,
     runtime_at,
+    reload_pcl_provider,
     opencodex_proxy_policy,
     sidecar_environment,
     sidecar_health,
@@ -46,6 +47,16 @@ def fake_runtime(root: Path) -> Path:
 
 
 class OpenCodexSidecarTests(unittest.TestCase):
+    def test_provider_reload_rejection_is_not_reported_as_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))
+            def runner(_runtime, arguments, _home, _timeout):
+                self.assertEqual(arguments[0], "--eval")
+                self.assertIn('requestBoundLocalProviderReload(p,"pcl")', arguments[1])
+                return subprocess.CompletedProcess(arguments, 1, stdout='{"kind":"unavailable"}', stderr="")
+            with self.assertRaises(RuntimeError):
+                reload_pcl_provider(runtime, Path(temp) / "config", runner)
+
     def test_runtime_requires_exact_upstream_provenance(self):
         with tempfile.TemporaryDirectory() as temp:
             root = fake_runtime(Path(temp) / "opencodex")
@@ -158,6 +169,10 @@ class OpenCodexSidecarTests(unittest.TestCase):
                 commands,
             )
             self.assertIn(
+                ["config", "set", "providers.pcl.autoToolChoiceOnlyModels", '["GLM-5.2"]', "--json"],
+                commands,
+            )
+            self.assertIn(
                 ["config", "set", "keepNativeChatGptOnV1", "true", "--json"],
                 commands,
             )
@@ -168,7 +183,9 @@ class OpenCodexSidecarTests(unittest.TestCase):
             self.assertFalse(any("proxy" in command or "noProxy" in command for command in commands))
             self.assertFalse(any(command[:3] == ["provider", "set-default", "pcl"] for command in commands))
             self.assertIn(["config", "validate", "--json"], commands)
-            self.assertEqual(commands[-1][:3], ["config", "set", "clientIntegrations"])
+            self.assertEqual(commands[-2][:3], ["config", "set", "clientIntegrations"])
+            self.assertEqual(commands[-1][0], "--eval")
+            self.assertIn("requestBoundLocalProviderReload", commands[-1][1])
             self.assertEqual(os.stat(config_home).st_mode & 0o777, 0o700)
 
     def test_gateway_switch_changes_only_pcl_provider_and_validates(self):
@@ -188,7 +205,8 @@ class OpenCodexSidecarTests(unittest.TestCase):
                 runner=runner,
             )
         self.assertEqual(commands[0][:3], ["provider", "add", "pcl"])
-        self.assertEqual(commands[-1], ["config", "validate", "--json"])
+        self.assertEqual(commands[-2], ["config", "validate", "--json"])
+        self.assertEqual(commands[-1][0], "--eval")
         self.assertFalse(any("openai" in command for command in commands))
         self.assertFalse(any("clientIntegrations" in command for command in commands))
         self.assertFalse(result["service_restarted"])

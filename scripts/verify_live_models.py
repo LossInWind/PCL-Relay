@@ -3,10 +3,66 @@
 import argparse
 import concurrent.futures
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
 from pathlib import Path
+
+
+def isolated_server(port, gateway_url):
+    """Use the shipped provider configuration without touching real Codex state."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def running():
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from pcl_codex_bridge.opencodex_sidecar import (
+            configure_sidecar, installed_runtime, sidecar_environment,
+        )
+        runtime = installed_runtime()
+        with tempfile.TemporaryDirectory(prefix='pcl-live-sidecar-') as temp:
+            home = Path(temp)
+            (home / 'codex').mkdir(mode=0o700)
+            previous = os.environ.get('CODEX_HOME')
+            os.environ['CODEX_HOME'] = str(home / 'codex')
+            try:
+                configure_sidecar(runtime, gateway_url,
+                                  ['GLM-5.2', 'DeepSeek-V4-Pro', 'DeepSeek-V4-Flash-0731', 'Kimi-K3'],
+                                  port=port, config_home=home / 'opencodex')
+                with (home / 'server.log').open('w') as log:
+                    process = subprocess.Popen(
+                        [str(runtime.bun), str(runtime.cli), 'start', '--port', str(port)],
+                        env=sidecar_environment(home / 'opencodex'), stdout=log, stderr=log,
+                    )
+                    try:
+                        for _ in range(60):
+                            if process.poll() is not None:
+                                raise RuntimeError('Isolated OpenCodex failed to start')
+                            try:
+                                urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                                    f'http://127.0.0.1:{port}/healthz', timeout=1).close()
+                                break
+                            except OSError:
+                                time.sleep(0.5)
+                        else:
+                            raise RuntimeError('Isolated OpenCodex did not become healthy')
+                        yield
+                    finally:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+            finally:
+                if previous is None:
+                    os.environ.pop('CODEX_HOME', None)
+                else:
+                    os.environ['CODEX_HOME'] = previous
+    return running()
 
 
 def post(base, path, body):
@@ -33,9 +89,9 @@ def post(base, path, body):
         raise RuntimeError('Stream ended without response.completed')
 
 
-def verify(base, model):
+def verify(base, model, compaction_version=1):
     started = time.monotonic()
-    result = {'model': model, 'checks': {}}
+    result = {'model': model, 'compaction_version': compaction_version, 'checks': {}}
     try:
         response = post(base, '/responses', {
             'model': model, 'stream': True, 'max_output_tokens': 4096,
@@ -45,13 +101,27 @@ def verify(base, model):
         text = ''.join(c.get('text', '') for i in response.get('output', [])
                        for c in i.get('content', []) if isinstance(c, dict))
         result['checks']['stream_text'] = 'LIVE_OK' in text
-        compact = post(base, '/responses/compact', {
+        compact_request = {
             'model': model,
             'input': [{'role': 'user', 'content': 'Remember checkpoint PCL_CHECKPOINT_927. No files changed.'}],
-        })
+        }
+        if compaction_version == 2:
+            compact_request.update(stream=True, max_output_tokens=4096)
+            compact_request['input'].append({'type': 'compaction_trigger'})
+        compact = post(base, '/responses' if compaction_version == 2 else '/responses/compact', compact_request)
+        # OpenCodex v1 returns retained messages plus the Codex checkpoint
+        # summary; the encrypted compaction item belongs to the v2 endpoint.
         result['checks']['compaction'] = any(
-            i.get('type') == 'compaction' for i in compact.get('output', [])
+            c.get('text', '').startswith('Another language model started to solve this problem')
+            for i in compact.get('output', []) for c in i.get('content', [])
+            if isinstance(c, dict)
         )
+        if compaction_version == 2:
+            items = compact.get('output', [])
+            result['checks']['compaction'] = (
+                len(items) == 1 and items[0].get('type') == 'compaction'
+                and items[0].get('encrypted_content', '').startswith('ocx1:')
+            )
         inputs = compact['output'] + [{
             'role': 'user',
             'content': 'Call write_note with the remembered checkpoint as text. After its result, return only TOOL_ROUNDTRIP_OK.',
@@ -65,6 +135,10 @@ def verify(base, model):
             'tools': [tool], 'tool_choice': 'required',
         })
         calls = [i for i in response.get('output', []) if i.get('type') == 'function_call']
+        result['tool_response'] = {
+            'status': response.get('status'), 'usage': response.get('usage'),
+            'output_types': [i.get('type') for i in response.get('output', [])],
+        }
         if len(calls) != 1 or calls[0]['name'] != 'write_note':
             raise RuntimeError('Expected exactly one write_note tool call')
         arguments = json.loads(calls[0]['arguments'])
@@ -86,6 +160,11 @@ def verify(base, model):
         text = ''.join(c.get('text', '') for i in final.get('output', [])
                        for c in i.get('content', []) if isinstance(c, dict))
         result['checks']['tool_roundtrip'] = 'TOOL_ROUNDTRIP_OK' in text
+        result['final_response'] = {
+            'status': final.get('status'), 'usage': final.get('usage'),
+            'output_types': [i.get('type') for i in final.get('output', [])],
+            'text': text[:300],
+        }
         result['ok'] = all(result['checks'].values())
     except Exception as exc:
         result.update(ok=False, error=f'{type(exc).__name__}: {exc}')
@@ -96,12 +175,20 @@ def verify(base, model):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--base-url', default='http://127.0.0.1:15725/v1')
+    parser.add_argument('--compaction-version', type=int, choices=(1, 2), default=1)
+    parser.add_argument('--isolated-port', type=int)
+    parser.add_argument('--gateway-url', default='http://100.113.234.58:15722/v1')
     parser.add_argument('--models', nargs='+', default=[
         'pcl/GLM-5.2', 'pcl/DeepSeek-V4-Pro', 'pcl/DeepSeek-V4-Flash-0731', 'pcl/Kimi-K3',
     ])
     args = parser.parse_args()
+    if args.isolated_port:
+        with isolated_server(args.isolated_port, args.gateway_url):
+            command = [sys.executable, __file__, '--base-url', f'http://127.0.0.1:{args.isolated_port}/v1',
+                       '--compaction-version', str(args.compaction_version), '--models', *args.models]
+            return subprocess.call(command)
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(verify, args.base_url, model) for model in args.models]
+        futures = [pool.submit(verify, args.base_url, model, args.compaction_version) for model in args.models]
         results = []
         for future in concurrent.futures.as_completed(futures):
             result = future.result()

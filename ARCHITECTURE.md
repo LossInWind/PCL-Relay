@@ -41,6 +41,9 @@ vendor/opencodex（固定完整上游，127.0.0.1）
 - 官方透传、provider 路由、模型目录、Responses SSE、取消、重试、压缩、工具调用转换和 Codex journal/restore 全部使用 OpenCodex 上游实现。
 - macOS 数据面使用 OpenCodex 已实现的 Bun 1.3.14 HTTP/SSE 上游回退；客户端 Responses WebSocket 保持开启。PCL Relay 不实现 WebSocket/SSE 互转，也不在失败后重复提交。
 - PCL provider 使用 OpenCodex `openai-chat` adapter；gateway 返回 Chat Completions，不能再承担 Chat→Responses 转换。
+- PCL GLM-5.2 使用上游 `autoToolChoiceOnlyModels` 配置：已实测其 `required` 工具模式可能重复调用直至输出截断。此降级意味着不保证强制工具选择，验收必须检查实际调用结果。
+- provider 配置写盘之后，调用上游进程绑定的 provider reload 契约，使运行状态同步生效；不重启官方 GPT 通路。热加载失败必须报错，不能只凭文件已更新报告成功。
+- 启用 OpenCodex 自带的空响应保护：仅在没有正文或工具调用的空完成时重试一次，仍失败则明确报错；不重放已输出工具的请求。该全局启动参数在已有进程上需通过上游安全重启生效。
 - `gateway.py` 只拥有 PCL API 调用、受限门户代理和自身管理接口。监听地址由部署者显式提供；它不调用 Tailscale、SSH 或 VPN 工具。
 - `native_router.py`、`official_transport.py`、`responses_protocol.py` 和 `responses_stream.py` 仅保留为迁移期旧会话回滚路径，不得承接新功能。
 - PCL API Key 只由中转站读取，不能进入客户端配置、拓扑或日志。

@@ -90,6 +90,19 @@ class OpenCodexSidecarTests(unittest.TestCase):
             self.assertFalse(second["service_restarted"])
             self.assertTrue(runtime_root.is_dir())
 
+    def test_read_only_app_runtime_can_be_staged_without_modifying_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "bundle"
+            root = fake_runtime(source / "opencodex")
+            root.chmod(0o555)
+            try:
+                result = stage_bundled_runtime(source, Path(temp) / "install")
+                self.assertTrue(result["installed"])
+                self.assertTrue(Path(result["runtime"]).stat().st_mode & 0o200)
+                self.assertEqual(root.stat().st_mode & 0o777, 0o555)
+            finally:
+                root.chmod(0o755)
+
     def test_environment_hands_discovered_codex_to_upstream_runtime_resolver(self):
         with tempfile.TemporaryDirectory() as temp:
             config_home = Path(temp) / "ocx"

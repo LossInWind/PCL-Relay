@@ -117,14 +117,19 @@ def stage_bundled_runtime(
     if not destination.exists():
         temporary = releases / f".{OPENCODEX_RELEASE_ID}.staging-{os.getpid()}"
         if temporary.exists():
+            _writable_staging_directories(temporary)
             shutil.rmtree(temporary)
         try:
             shutil.copytree(source, temporary, symlinks=True)
+            # macOS signed App resources are read-only. A copied read-only
+            # directory cannot always be renamed or cleaned up on APFS.
+            _writable_staging_directories(temporary)
             runtime_at(temporary)
             os.replace(temporary, destination)
             installed = True
         finally:
             if temporary.exists():
+                _writable_staging_directories(temporary)
                 shutil.rmtree(temporary)
 
     current = install_home / "current"
@@ -142,6 +147,14 @@ def stage_bundled_runtime(
         "current": str(current),
         "service_restarted": False,
     }
+
+
+def _writable_staging_directories(root: Path) -> None:
+    """Only adjust our new staging tree; never follow dependency symlinks."""
+    for directory, _dirs, _files in os.walk(root, followlinks=False):
+        path = Path(directory)
+        if not path.is_symlink():
+            os.chmod(path, path.stat().st_mode | 0o700)
 
 
 def installed_runtime(

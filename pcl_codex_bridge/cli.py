@@ -20,6 +20,7 @@ from .client_config import (
     UNSANDBOXED_MARKER,
     doctor,
     install_source_tree,
+    migrate_thread_provider_index,
     prepare_legacy_opencodex_handoff,
     restore_legacy_opencodex_handoff,
     uninstall_client_config,
@@ -36,6 +37,7 @@ from .models import (
     model_alias,
     model_details,
     save_registry,
+    codex_home,
 )
 from .routes import add_gateway, list_gateways, remove_gateway, select_gateway
 from .topology_sync import (
@@ -155,9 +157,14 @@ def activate_opencodex_sidecar(args: argparse.Namespace) -> Dict[str, Any]:
             f"(OpenCodex restore: {upstream_restore}, legacy restore: {legacy_restore}): {exc}"
         ) from exc
     INTEGRATION_DISABLED_MARKER.unlink(missing_ok=True)
+    # OpenCodex intentionally leaves foreign provider histories untouched.
+    # These records belong to our retired legacy provider, so the handoff owns
+    # their one-time migration after (never before) successful activation.
+    history = migrate_thread_provider_index(codex_home(), "pcl_relay_official", "openai")
     return {
         **activated,
         "legacy_handoff": handoff,
+        "history_migration": history,
         "legacy_router_stopped": False,
     }
 

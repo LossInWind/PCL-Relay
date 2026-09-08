@@ -49,6 +49,33 @@ NATIVE_SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / "pcl-relay-
 AGENT_ROLE_MARKER = "# >>> pcl-relay managed native agent role v2 >>>"
 
 
+def _open_history_files() -> set[str]:
+    """Observe open files without stopping Codex or touching active rollouts."""
+    if sys.platform.startswith("linux"):
+        paths: set[str] = set()
+        for process in Path("/proc").iterdir():
+            if not process.name.isdigit():
+                continue
+            try:
+                for fd in (process / "fd").iterdir():
+                    try:
+                        value = os.readlink(fd)
+                        if value.endswith(".jsonl"):
+                            paths.add(str(Path(value).resolve()))
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        return paths
+    command = shutil.which("lsof") or "/usr/sbin/lsof"
+    observed = subprocess.run([command, "-n", "-P", "-F", "n", "-u", str(os.getuid())],
+                              capture_output=True, text=True, timeout=30, check=False)
+    if observed.returncode not in (0, 1):
+        raise RuntimeError("Cannot safely inspect open Codex history files")
+    return {str(Path(line[1:]).resolve()) for line in observed.stdout.splitlines()
+            if line.startswith("n/") and line.endswith(".jsonl")}
+
+
 def migrate_thread_provider_index(
     home: Path,
     source_provider: str,
@@ -71,6 +98,7 @@ def migrate_thread_provider_index(
         "migrated_rollouts": 0,
         "backup": "",
         "journal": "",
+        "deferred_threads": [],
     }
     if not source_provider or source_provider == target_provider:
         return result
@@ -103,6 +131,7 @@ def migrate_thread_provider_index(
         )
         session_meta_token = re.compile(rb'"type"\s*:\s*"session_meta"')
         plans: List[tuple[str, Path, bool]] = []
+        open_files = _open_history_files()
         for thread_id, rollout_value, database_provider in rows:
             rollout = Path(rollout_value)
             if not rollout.is_file():
@@ -116,6 +145,9 @@ def migrate_thread_provider_index(
                     has_source_metadata = has_source_metadata or bool(source_token.search(line))
                     has_target_metadata = has_target_metadata or bool(target_token.search(line))
             if has_source_metadata:
+                if str(rollout.resolve()) in open_files:
+                    result["deferred_threads"].append(thread_id)
+                    continue
                 plans.append((thread_id, rollout, True))
             elif database_provider == source_provider and has_target_metadata:
                 plans.append((thread_id, rollout, False))
@@ -134,6 +166,8 @@ def migrate_thread_provider_index(
         journal_dir = home / "provider_migrations"
         journal_dir.mkdir(parents=True, exist_ok=True)
         journal_path = journal_dir / f"provider-{stamp}.json"
+        rollout_backups = journal_dir / f"rollouts-{stamp}"
+        rollout_backups.mkdir(mode=0o700)
         journal = {
             "source_provider": source_provider,
             "target_provider": target_provider,
@@ -141,6 +175,7 @@ def migrate_thread_provider_index(
             "database_backup": str(backup_path),
             "rollouts": [str(path) for _, path, rewrite in plans if rewrite],
             "thread_ids": [thread_id for thread_id, _, _ in plans],
+            "rollout_backup_directory": str(rollout_backups),
         }
         _atomic_write_text(journal_path, json.dumps(journal, ensure_ascii=False, indent=2) + "\n")
 
@@ -151,6 +186,8 @@ def migrate_thread_provider_index(
             if not rewrite:
                 migrated_ids.append(thread_id)
                 continue
+            before = rollout.stat()
+            shutil.copy2(rollout, rollout_backups / f"{thread_id}.jsonl")
             with rollout.open("rb") as source:
                 temporary = rollout.with_name(rollout.name + f".provider-migration-{os.getpid()}.tmp")
                 try:
@@ -167,6 +204,13 @@ def migrate_thread_provider_index(
                         temporary.unlink(missing_ok=True)
                         continue
                     os.chmod(temporary, rollout.stat().st_mode & 0o777)
+                    current = rollout.stat()
+                    if (current.st_ino, current.st_size, current.st_mtime_ns) != (
+                        before.st_ino, before.st_size, before.st_mtime_ns
+                    ):
+                        result["deferred_threads"].append(thread_id)
+                        continue
+                    os.utime(temporary, ns=(before.st_atime_ns, before.st_mtime_ns))
                     os.replace(temporary, rollout)
                 finally:
                     temporary.unlink(missing_ok=True)

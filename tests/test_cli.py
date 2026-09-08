@@ -98,6 +98,21 @@ class CliTests(unittest.TestCase):
         self.assertTrue(status["active"])
         self.assertEqual(status["transport_implementation"], "upstream-opencodex")
 
+    def test_activation_migrates_only_our_legacy_history_after_success(self):
+        calls = []
+        with (
+            mock.patch("pcl_codex_bridge.cli.installed_runtime"),
+            mock.patch("pcl_codex_bridge.cli.prepare_legacy_opencodex_handoff", return_value={"changed": True}),
+            mock.patch("pcl_codex_bridge.cli.activate_sidecar", side_effect=lambda *_a, **_k: calls.append("activated") or {"active": True}),
+            mock.patch("pcl_codex_bridge.cli.INTEGRATION_DISABLED_MARKER"),
+            mock.patch("pcl_codex_bridge.cli.codex_home", return_value=Path("/test/.codex")),
+            mock.patch("pcl_codex_bridge.cli.migrate_thread_provider_index", side_effect=lambda *_a: calls.append("history") or {"migrated_threads": 3}) as migrate,
+        ):
+            result = activate_opencodex_sidecar(mock.MagicMock(port=15725))
+        self.assertEqual(calls, ["activated", "history"])
+        migrate.assert_called_once_with(Path("/test/.codex"), "pcl_relay_official", "openai")
+        self.assertEqual(result["history_migration"]["migrated_threads"], 3)
+
     def test_activation_failure_restores_upstream_and_legacy_config(self):
         runtime = mock.MagicMock()
         args = mock.MagicMock(port=15725)

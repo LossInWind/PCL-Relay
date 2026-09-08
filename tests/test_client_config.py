@@ -125,6 +125,9 @@ class ClientConfigTests(unittest.TestCase):
             self.assertEqual(result["migrated_rollouts"], 2)
             self.assertTrue(Path(result["backup"]).exists())
             self.assertTrue(Path(result["journal"]).exists())
+            journal = json.loads(Path(result["journal"]).read_text())
+            original = Path(journal["rollout_backup_directory"]) / "old-1.jsonl"
+            self.assertIn('"model_provider":"openai"', original.read_text())
             connection = sqlite3.connect(database)
             rows = connection.execute("SELECT id, model_provider FROM threads ORDER BY id").fetchall()
             connection.close()
@@ -138,6 +141,25 @@ class ClientConfigTests(unittest.TestCase):
             self.assertIn('"model_provider":"pcl_relay_official"', second_lines[0])
             self.assertEqual(second_lines[1], '{"type":"event","value":"\\\"model_provider\\\":\\\"openai\\\""}')
             self.assertIn('"model_provider":"pcl_relay_official"', second_lines[2])
+
+    def test_history_migration_defers_open_rollouts_and_is_idempotent(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            rollout = home / "active.jsonl"
+            original = '{"type":"session_meta","payload":{"model_provider":"pcl_relay_official"}}\n'
+            rollout.write_text(original)
+            with sqlite3.connect(home / "state_5.sqlite") as db:
+                db.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, model_provider TEXT)")
+                db.execute("INSERT INTO threads VALUES (?,?,?)", ("active", str(rollout), "pcl_relay_official"))
+            with mock.patch("pcl_codex_bridge.client_config._open_history_files", return_value={str(rollout.resolve())}):
+                pending = migrate_thread_provider_index(home, "pcl_relay_official", "openai")
+            self.assertEqual(pending["deferred_threads"], ["active"])
+            self.assertEqual(pending["migrated_threads"], 0)
+            self.assertEqual(rollout.read_text(), original)
+            with mock.patch("pcl_codex_bridge.client_config._open_history_files", return_value=set()):
+                self.assertEqual(migrate_thread_provider_index(home, "pcl_relay_official", "openai")["migrated_threads"], 1)
+                self.assertEqual(migrate_thread_provider_index(home, "pcl_relay_official", "openai")["migrated_threads"], 0)
 
     def test_configured_router_port_prefers_codex_source_of_truth(self):
         with tempfile.TemporaryDirectory() as temp:

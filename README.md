@@ -10,6 +10,10 @@ PCL Relay 只负责 endpoint/provider/model 路由、PCL gateway、Relay 心跳�
 
 ## 工作方式
 
+### 从旧 Relay 迁移的历史记录
+
+旧版本将会话标记为 `pcl_relay_official`；OpenCodex 恢复官方 `openai` 身份后，Codex 会按 provider 过滤旧记录。启用成功后，Relay 同步迁移自己旧 provider 的 SQLite 索引与 rollout 元数据，先保留数据库及原始 rollout 备份。其他 provider、对话正文和时间顺序不变；正在打开或变动的会话延后处理，不中断任务。重新加载 Codex 窗口可刷新其旧列表缓存。
+
 ### 无 systemd 的 Pod
 
 Pod 使用 OpenCodex 自己的 detached `ensure` 启动，不安装宿主机服务，也不承诺容器重建后自动恢复。`.codex` 指向持久卷时，也会在该卷对应的 VS Code 扩展目录发现 Codex 可执行文件。

@@ -16,6 +16,7 @@ from pcl_codex_bridge.opencodex_sidecar import (
     configure_sidecar,
     configure_opencodex_proxy_policy,
     deactivate_sidecar,
+    invoke_sidecar,
     prepare_sidecar,
     runtime_at,
     reload_pcl_provider,
@@ -47,6 +48,13 @@ def fake_runtime(root: Path) -> Path:
 
 
 class OpenCodexSidecarTests(unittest.TestCase):
+    def test_service_install_pins_runtime_not_build_dependency(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))
+            with mock.patch("pcl_codex_bridge.opencodex_sidecar.subprocess.run") as run:
+                invoke_sidecar(runtime, ["service", "install"], Path(temp) / "config")
+            self.assertEqual(run.call_args.kwargs["env"]["OPENCODEX_BUN_PATH"], str(runtime.bun))
+
     def test_provider_reload_rejection_is_not_reported_as_success(self):
         with tempfile.TemporaryDirectory() as temp:
             runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))

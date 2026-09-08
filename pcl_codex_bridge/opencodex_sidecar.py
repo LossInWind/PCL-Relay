@@ -196,7 +196,9 @@ def invoke_sidecar(
     return subprocess.run(
         command,
         cwd=runtime.root,
-        env=sidecar_environment(config_home),
+        # Service installation otherwise prefers node_modules/bun (the build
+        # dependency), even when the CLI itself was launched with 1.3.14.
+        env=sidecar_environment(config_home, {"OPENCODEX_BUN_PATH": str(runtime.bun)}),
         text=True,
         capture_output=True,
         timeout=timeout,

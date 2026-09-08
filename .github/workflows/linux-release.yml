@@ -5,6 +5,9 @@ on:
     branches: [opencodex-sidecar]
 permissions:
   contents: write
+concurrency:
+  group: linux-release-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   package:
     strategy:
@@ -46,6 +49,9 @@ jobs:
           mkdir -p .build/verify-package
           tar -xzf dist/PCL-Relay-linux-*.tar.gz -C .build/verify-package
           .build/verify-package/PCL-Relay-linux-*/pcl-codex --help
+          mkdir -p .build/verify-home
+          HOME="$PWD/.build/verify-home" .build/verify-package/PCL-Relay-linux-*/install.sh
+          HOME="$PWD/.build/verify-home" .build/verify-home/.local/bin/pcl-codex --help
           cd dist && sha256sum --check *.sha256
       - name: Upload to existing draft only
         env:

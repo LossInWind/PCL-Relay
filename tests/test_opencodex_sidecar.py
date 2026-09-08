@@ -135,6 +135,23 @@ class OpenCodexSidecarTests(unittest.TestCase):
                 environment = sidecar_environment(config_home)
             self.assertEqual(environment["CODEX_CLI_PATH"], "/chosen/codex")
 
+    def test_private_native_systemctl_is_scoped_to_sidecar_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            client = home / ".local/share/pcl-codex-bridge/systemd-client/bin/systemctl"
+            client.parent.mkdir(parents=True)
+            client.write_bytes(b"\x7fELFtest")
+            client.chmod(0o755)
+            with mock.patch("pathlib.Path.home", return_value=home), mock.patch(
+                "os.uname", return_value=mock.Mock(sysname="Linux")
+            ), mock.patch.dict(os.environ, {"PATH": "/usr/bin", "CODEX_CLI_PATH": "/codex"}):
+                result = sidecar_environment(home / "config")
+                self.assertEqual(result["PATH"], str(client.parent) + ":/usr/bin")
+                self.assertEqual(os.environ["PATH"], "/usr/bin")
+                client.write_bytes(b"#!/bin/sh\nexit 0\n")
+                with self.assertRaisesRegex(RuntimeError, "native binary"):
+                    sidecar_environment(home / "config")
+
     def test_configuration_is_only_thin_upstream_cli_commands(self):
         with tempfile.TemporaryDirectory() as temp:
             runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))

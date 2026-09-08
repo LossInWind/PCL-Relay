@@ -10,6 +10,12 @@ PCL Relay 只负责 endpoint/provider/model 路由、PCL gateway、Relay 心跳�
 
 ## 工作方式
 
+### 无 systemd 的 Pod
+
+Pod 使用 OpenCodex 自己的 detached `ensure` 启动，不安装宿主机服务，也不承诺容器重建后自动恢复。`.codex` 指向持久卷时，也会在该卷对应的 VS Code 扩展目录发现 Codex 可执行文件。
+
+部分镜像的 `systemctl` 是返回格式不完整的 Python 兼容脚本。此时必须保留 OpenCodex 的配置归属检查，不能伪造成功结果。可从该 Ubuntu 版本的已验证 APT 源仅下载并解包 `systemd` 包，将其中原生 `bin/systemctl` 放在 `~/.local/share/pcl-codex-bridge/systemd-client/bin/systemctl`。Relay 仅为自己的 OpenCodex 子进程优先使用这个客户端，不安装 systemd、不替换 `/usr/bin/systemctl`、不修改全局 PATH。原生客户端报告总线不可达后，由未修改的 OpenCodex 检查磁盘上的服务归属。软件升级保留此独立客户端。
+
 ```text
 Codex Desktop / VS Code Codex
               |

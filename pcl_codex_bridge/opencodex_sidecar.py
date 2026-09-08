@@ -169,6 +169,18 @@ def sidecar_environment(
 ) -> Dict[str, str]:
     environment = dict(os.environ)
     environment["OPENCODEX_HOME"] = str(config_home)
+    # Some Pod images replace systemctl with a Python shim that reports a
+    # missing unit with exit 0 but omits the requested properties. An explicitly
+    # provisioned Ubuntu client lets upstream observe the real missing bus and
+    # run its disk-based ownership checks. Never replace the system command or
+    # synthesize service-manager output. This PATH belongs only to our child.
+    systemd_client = Path.home() / ".local/share/pcl-codex-bridge/systemd-client/bin/systemctl"
+    if os.uname().sysname == "Linux" and systemd_client.is_file():
+        with systemd_client.open("rb") as source:
+            native_client = source.read(4) == b"\x7fELF"
+        if not native_client or not os.access(systemd_client, os.X_OK):
+            raise RuntimeError("The private systemd client must be an executable native binary")
+        environment["PATH"] = str(systemd_client.parent) + os.pathsep + environment.get("PATH", os.defpath)
     if extra:
         environment.update(extra)
     if not environment.get("CODEX_CLI_PATH"):

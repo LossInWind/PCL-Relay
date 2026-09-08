@@ -357,11 +357,10 @@ with tempfile.TemporaryDirectory(prefix="pcl-relay-bootstrap-") as temporary:
         if not os.access(destination.parent, os.W_OK):
             destination = pathlib.Path.home() / "Applications" / "PCL Relay.app"
             destination.parent.mkdir(parents=True, exist_ok=True)
-        staging = destination.parent / ("." + destination.name + ".bootstrap-" + str(os.getpid()))
-        backup = destination.parent / ("." + destination.name + ".previous")
-        if staging.exists(): shutil.rmtree(staging)
+        stamp = str(time.time_ns())
+        staging = destination.parent / ("." + destination.name + ".bootstrap-" + stamp)
+        backup = destination.parent / ("." + destination.name + ".previous-" + stamp)
         shutil.copytree(app, staging, symlinks=True)
-        if backup.exists(): shutil.rmtree(backup)
         if destination.exists(): destination.replace(backup)
         try:
             staging.replace(destination)

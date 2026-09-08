@@ -1139,8 +1139,12 @@ def find_codex() -> Optional[str]:
     if override and usable(Path(override)):
         return override
     candidates = [Path("/Applications/ChatGPT.app/Contents/Resources/codex")]
-    candidates.extend(Path.home().glob(".vscode-server/extensions/openai.chatgpt-*/bin/*/codex"))
-    candidates.extend(Path.home().glob(".vscode/extensions/openai.chatgpt-*/bin/*/codex"))
+    # Pods may keep both .codex and VS Code on a persistent volume, with only
+    # .codex linked from HOME. Search that explicit user-selected location too.
+    homes = list(dict.fromkeys([Path.home(), codex_home().resolve().parent]))
+    for home in homes:
+        candidates.extend(sorted(home.glob(".vscode-server/extensions/openai.chatgpt-*/bin/*/codex"), reverse=True))
+        candidates.extend(sorted(home.glob(".vscode/extensions/openai.chatgpt-*/bin/*/codex"), reverse=True))
     found = shutil.which("codex")
     if found:
         candidates.append(Path(found))

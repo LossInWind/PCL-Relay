@@ -15,6 +15,7 @@ from pcl_codex_bridge.client_config import (
     combined_catalog,
     configured_native_router_port,
     detect_official_proxy,
+    find_codex,
     install_client_config,
     install_source_tree,
     managed_block,
@@ -29,6 +30,23 @@ from pcl_codex_bridge.relay_discovery import find_tailscale
 
 
 class ClientConfigTests(unittest.TestCase):
+    def test_codex_runtime_discovery_follows_explicit_persistent_codex_home(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, pvc = Path(temp) / "home", Path(temp) / "pvc"
+            home.mkdir()
+            (pvc / ".codex").mkdir(parents=True)
+            (home / ".codex").symlink_to(pvc / ".codex", target_is_directory=True)
+            binary = pvc / ".vscode-server/extensions/openai.chatgpt-26.901/bin/linux-x86_64/codex"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("test fixture")
+            binary.chmod(0o755)
+            def version(command, **_kwargs):
+                return mock.Mock(returncode=0 if Path(command[0]).resolve() == binary.resolve() else 1, stdout="codex")
+            with mock.patch("pathlib.Path.home", return_value=home), mock.patch.dict(
+                os.environ, {"CODEX_HOME": str(home / ".codex")}
+            ), mock.patch("pcl_codex_bridge.client_config.subprocess.run", side_effect=version):
+                self.assertEqual(Path(find_codex()).resolve(), binary.resolve())
+
     def test_legacy_handoff_is_scoped_and_exactly_rollbackable(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".codex"

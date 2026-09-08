@@ -53,8 +53,7 @@ struct GlassCard<Content: View>: View {
         content()
             .padding(16)
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(Color.white.opacity(0.075)))
-            .shadow(color: .black.opacity(0.12), radius: 14, y: 7)
+            .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(Color.primary.opacity(0.08)))
     }
 }
 
@@ -73,8 +72,8 @@ struct ConsolePanel: View {
             .frame(minHeight: 130, maxHeight: 280)
         }
         .padding(14)
-        .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.07)))
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
     }
 }
 

@@ -23,11 +23,26 @@ func renderRoutingPreview(to path: String, dark: Bool) throws {
     """#)
     model.selectedGatewayID = "relay"
     model.routingCheckedAt = Date()
-    let host = NSHostingView(rootView: RoutingView().environmentObject(model)
-        .frame(width: 1160, height: 960)
+    model.registry = try BridgeDecode.value(ModelRegistry.self, from: #"""
+    {"gateway":"http://relay:15722/v1","selected_agents":["pcl_deepseek_pro","pcl_kimi"],"checked_at":"2026-09-08 16:01","catalog_checked_at":"2026-09-08 18:41","models":{},"available_models":{
+    "DeepSeek-V4-Pro":{"id":"DeepSeek-V4-Pro","alias":"pcl_deepseek_pro","family":"DeepSeek","category":"chat","description":"复杂推理和执行任务","agent_eligible":true,"recommended":true,"owned_by":"PCL","input_modalities":["text"]},
+    "Kimi-K3":{"id":"Kimi-K3","alias":"pcl_kimi","family":"Kimi","category":"chat","description":"长上下文阅读与分析","agent_eligible":true,"recommended":true,"owned_by":"PCL","input_modalities":["text"]}}}
+    """#)
+    model.selectedAgents = ["pcl_deepseek_pro", "pcl_kimi"]
+    let sectionName = CommandLine.arguments.firstIndex(of: "--preview-section").flatMap {
+        CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil
+    } ?? "routing"
+    let section: AppSection = sectionName == "models" ? .models : sectionName == "portal" ? .portal : .routing
+    let width: CGFloat = CommandLine.arguments.contains("--narrow") ? 960 : 1120
+    let page: AnyView = section == .models ? AnyView(ModelsAgentsView()) : section == .portal ? AnyView(PortalView()) : AnyView(RoutingView())
+    let host = NSHostingView(rootView: VStack(spacing: 0) {
+        HeaderBar(section: .constant(section))
+        page
+    }.environmentObject(model)
+        .frame(width: width, height: 760)
         .background(Color(nsColor: .windowBackgroundColor))
         .environment(\.colorScheme, dark ? .dark : .light))
-    host.frame = NSRect(x: 0, y: 0, width: 1160, height: 960)
+    host.frame = NSRect(x: 0, y: 0, width: width, height: 760)
     let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
     window.contentView = host

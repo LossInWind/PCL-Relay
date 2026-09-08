@@ -9,6 +9,14 @@ from pcl_codex_bridge.runtime_snapshot import runtime_snapshot
 
 
 class RoutingDashboardTests(unittest.TestCase):
+    def test_first_status_read_does_not_register_or_save(self):
+        with mock.patch.object(topology_sync, "load_registry", return_value={}), mock.patch.object(topology_sync, "save_registry") as save:
+            first = topology_sync.list_peers()
+            second = topology_sync.list_peers()
+        save.assert_not_called()
+        self.assertEqual(first["node_id"], "")
+        self.assertEqual(first["node_id"], second["node_id"])
+
     def test_single_device_probe_never_connects_other_targets(self):
         targets = [{"id": "a"}, {"id": "b"}]
         with mock.patch.object(deployment, "_load_targets", return_value=targets), mock.patch.object(deployment, "probe_target", side_effect=lambda row, timeout: row) as probe:

@@ -7,7 +7,15 @@ extension AppModel {
     var routingDevices: [RoutingDevice] {
         RoutingSnapshot.devices(localID: relaySync?.nodeID ?? "local", localName: relaySync?.nodeName ?? "当前 Mac",
                                 localVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版",
-                                peers: (relaySync?.peers ?? []).map { peerChecks[$0.id] ?? $0 }, targets: (deploymentTargets?.targets ?? []).map { deviceChecks[$0.id] ?? $0 })
+                                peers: (relaySync?.peers ?? []).map { peerChecks[$0.id] ?? $0 }, targets: (deploymentTargets?.targets ?? []).map { deviceChecks[$0.id] ?? $0 }).map { value in
+            var device = value
+            let evidence = checks["device:\(device.id)"] ?? checks[device.targets.isEmpty ? "sync" : "devices"]
+            if !device.isLocal, evidence?.phase != .succeeded {
+                device.evidenceStale = true
+                device.online = nil
+            }
+            return device
+        }
     }
 
     /// This path deliberately excludes bootstrap, sync-now, install and route selection.

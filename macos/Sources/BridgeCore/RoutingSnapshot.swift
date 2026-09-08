@@ -22,6 +22,7 @@ public struct RoutingDevice: Identifiable, Equatable, Sendable {
     public var installedVersion: String?
     public var targets: [DeploymentTarget]
     public var peers: [RelaySyncPeer]
+    public var evidenceStale = false
     public var runtime: RoutingRuntime? { targets.compactMap(\.runtime).first ?? peers.compactMap(\.runtime).first }
     public var canReceiveUpdateOffer: Bool { !isLocal && !peers.isEmpty }
     public var updateReason: String {
@@ -47,12 +48,14 @@ public struct RoutingDevice: Identifiable, Equatable, Sendable {
 
     public var connectionTitle: String {
         if isLocal { return "当前设备" }
+        if evidenceStale { return "状态待复查 · 历史结果" }
         if online == true { return "Relay 在线" }
         if targets.contains(where: { $0.ssh == true }) { return "SSH 可达 · Relay 未就绪" }
         return online == false ? "离线或不可达" : "尚未检查"
     }
 
     public var versionTitle: String {
+        if evidenceStale { return runningVersion.map { "上次报告 \($0)" } ?? "运行版本未知" }
         if needsRestart { return "待重启完成升级" }
         return runningVersion.flatMap { $0.isEmpty ? nil : $0 } ?? "运行版本未知"
     }

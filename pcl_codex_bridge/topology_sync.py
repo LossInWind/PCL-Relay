@@ -295,11 +295,14 @@ def _peer_records(registry: Dict[str, Any]) -> List[Dict[str, str]]:
 
 
 def list_peers(probe: bool = False, timeout: int = 10, peer_id: str = "") -> Dict[str, Any]:
-    registry = load_registry()
+    from copy import deepcopy
+
+    registry = deepcopy(load_registry())
+    registered_node_id = str((registry.get("relay_sync") or {}).get("node_id") or "")
     metadata = _sync_metadata(registry)
-    if registry.get("relay_sync") != metadata:
-        registry["relay_sync"] = metadata
-        save_registry(registry)
+    # Status inspection must not silently register a node or rewrite settings.
+    # Persist identity only in explicit topology/service operations.
+    registry["relay_sync"] = metadata
     peers: List[Dict[str, Any]] = []
     for peer in _peer_records(registry):
         if peer_id and peer["id"] != peer_id:
@@ -329,7 +332,7 @@ def list_peers(probe: bool = False, timeout: int = 10, peer_id: str = "") -> Dic
         raise RuntimeError("Unknown PCL Relay sync node")
     return {
         "protocol": SYNC_PROTOCOL,
-        "node_id": metadata["node_id"],
+        "node_id": registered_node_id,
         "node_name": metadata["node_name"],
         "revision": metadata["revision"],
         "digest": topology_envelope(registry)["digest"],

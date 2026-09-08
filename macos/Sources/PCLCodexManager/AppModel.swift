@@ -107,7 +107,7 @@ final class AppModel: ObservableObject {
         if doctor?.gateway != true { return "PCL 接入点不可达" }
         if checks["integration"]?.phase != .succeeded { return "Codex 接入待确认" }
         if !integrationActive { return "Codex 集成待启用" }
-        return "接入点可达 · 非模型实测"
+        return "PCL 接入点可达"
     }
 
     var gatewayDisplayName: String {
@@ -156,10 +156,17 @@ final class AppModel: ObservableObject {
     func start() {
         guard !didStart else { return }
         didStart = true
+        SettingsWindowPresenter.shared.model = self
         let loginItem = loginItemManager.status()
         launchAtLoginEnabled = loginItem.enabled
         launchAtLoginStatusText = loginItem.message
         refreshAll()
+    }
+
+    func enableLoginItem() {
+        let result = loginItemManager.configure()
+        launchAtLoginEnabled = result.enabled
+        launchAtLoginStatusText = result.message
     }
 
     func refreshAll() {

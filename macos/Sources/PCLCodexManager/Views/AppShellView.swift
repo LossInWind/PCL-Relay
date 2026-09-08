@@ -41,6 +41,7 @@ struct RootView: View {
 
             VStack(spacing: 0) {
                 HeaderBar(section: sectionBinding)
+                if let banner = model.banner { BannerView(message: banner).padding(.vertical, 6) }
                 Group {
                     switch section {
                     case .routing: RoutingView()
@@ -50,13 +51,9 @@ struct RootView: View {
                 }
             }
 
-            if let banner = model.banner {
-                BannerView(message: banner)
-                    .padding(.top, 62)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .zIndex(4)
-            }
         }
-        .preferredColorScheme(.dark)
+        .sheet(isPresented: $model.showDetectionConfirmation) {
+            ModelDetectionConfirmation().environmentObject(model)
+        }
     }
 }

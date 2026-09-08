@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct PCLCodexManagerApp: App {
+    @NSApplicationDelegateAdaptor(RelayAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
 
     init() {
@@ -27,20 +28,19 @@ struct PCLCodexManagerApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
-            RootView()
-                .environmentObject(model)
-                .frame(minWidth: 960, minHeight: 640)
-                .task { model.start() }
-        }
-        .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1120, height: 760)
         .commands {
             CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .appSettings) {
+                Button("打开完整设置") { SettingsWindowPresenter.shared.show(model) }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
             CommandMenu("中转站") {
                 Button("刷新状态") { model.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
-                Button("检测模型") { model.detectModels() }
+                Button("能力实测…") {
+                    SettingsWindowPresenter.shared.show(model)
+                    model.showDetectionConfirmation = true
+                }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
             }
         }

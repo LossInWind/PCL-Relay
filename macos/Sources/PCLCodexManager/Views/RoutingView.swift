@@ -9,13 +9,17 @@ struct RoutingView: View {
     @State private var showAddDevice = false
     @State private var showAdvanced = false
     @State private var showUpgrade = false
+    @State private var showPaths = false
 
     var body: some View {
+        ScrollViewReader { scroll in
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 RoutingOverview(onUpgrade: { showUpgrade = true })
-                RelayTopologyCanvas()
                 RoutingDeviceList(onAdd: { showAddDevice = true })
+                DisclosureGroup("模型请求路径", isExpanded: $showPaths) {
+                    RelayTopologyCanvas().padding(.top, 12)
+                }
                 DisclosureGroup("高级设置", isExpanded: $showAdvanced) {
                     VStack(alignment: .leading, spacing: 16) {
                         HStack {
@@ -32,11 +36,21 @@ struct RoutingView: View {
                             }
                         }
                         OpenCodexProxyCard()
+                        HStack {
+                            Text(model.launchAtLoginStatusText).font(.caption).foregroundStyle(.secondary)
+                            if !model.launchAtLoginEnabled {
+                                Button("启用登录启动") { model.enableLoginItem() }
+                            }
+                        }
                         Text("Relay 只管理模型接入与软件更新，不修改 SSH、VPN、端口转发或文件挂载。检查不会应用路由或重启模型服务。")
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.top, 12)
                 }.font(.subheadline)
             }.padding(24)
+        }
+        .onChange(of: model.selectedRoutingDeviceID) { _, id in
+            if let id { scroll.scrollTo(id, anchor: .top) }
+        }
         }
         .sheet(isPresented: $showAddGateway) { AddGatewaySheet(isPresented: $showAddGateway).environmentObject(model) }
         .sheet(isPresented: $showAddPeer) { AddRelayPeerSheet(isPresented: $showAddPeer).environmentObject(model) }
@@ -48,6 +62,20 @@ struct RoutingView: View {
                 Text("先检查发布版本，再更新已接入设备。安装成功不代表后台已切换版本；返回设备列表检查运行版本。离线设备不计完成。")
                     .foregroundStyle(.secondary)
                 LocalReleaseUpdateStrip()
+                if let check = model.checks["updates"] {
+                    Text(check.summary).font(.caption).foregroundStyle(check.phase == .failed ? Color.orange : Color.secondary)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(model.routingDevices.filter { !$0.isLocal }) { device in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(device.name).font(.subheadline.weight(.semibold))
+                                Text("\(device.installationTitle) · \(device.connectionTitle) · \(device.versionTitle)")
+                                Text(device.updateReason).foregroundStyle(.secondary)
+                            }.font(.caption)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(maxHeight: 240)
                 Button(model.isDeployingTopology ? "安装接入中…" : "安装 / 接入登记设备") {
                     model.deployLatestToRegisteredTargets()
                 }.disabled(model.isDeployingTopology || model.releaseUpdate?.topologyDeploymentReady != true)
@@ -57,7 +85,7 @@ struct RoutingView: View {
                     }
                 }
                 HStack { Spacer(); Button("返回") { showUpgrade = false }.keyboardShortcut(.cancelAction) }
-            }.padding(24).frame(minWidth: 650)
+            }.padding(24).frame(width: 800)
         }
     }
 }
@@ -238,9 +266,11 @@ private struct AddDeploymentTargetSheet: View {
             Text("登记首次安装节点").font(.title2.weight(.semibold))
             Text("只需填写已经由你或 Haichen Services 配好、能够登录的 SSH alias。PCL Relay 会从这一条 alias 自动解析 HostName，识别平台并使用 http://HostName:15726 验收；不会扫描其他设备。")
                 .font(.caption).foregroundStyle(.secondary)
-            TextField("显示名称，例如 Kai Mac", text: $name)
-            TextField("SSH alias，例如 kai-mac", text: $sshTarget).font(.body.monospaced())
-            TextField("控制 endpoint（可选；留空自动从 SSH HostName 推导）", text: $controlURL).font(.body.monospaced())
+            LabeledContent("显示名称") { TextField("例如 Kai Mac（可选）", text: $name) }
+            LabeledContent("SSH 别名") { TextField("例如 kai-mac", text: $sshTarget).font(.body.monospaced()) }
+            DisclosureGroup("高级地址设置") {
+                LabeledContent("控制地址") { TextField("留空时从该 SSH 别名推导", text: $controlURL).font(.body.monospaced()) }
+            }
             VStack(alignment: .leading, spacing: 5) {
                 Label("只登记字面 alias，不枚举 ~/.ssh/config，也不扫描 Tailnet", systemImage: "checkmark.shield")
                 Label("远端先从 GitHub 下载并校验；失败后才从当前节点传输已校验缓存", systemImage: "shippingbox")
@@ -297,14 +327,14 @@ private struct LocalReleaseUpdateStrip: View {
             Button(model.isCheckingAppUpdate ? "检查中" : "检查更新") { model.refreshAppUpdate() }
                 .buttonStyle(QuietButtonStyle()).disabled(model.isCheckingAppUpdate || model.isInstallingAppUpdate)
             if model.releaseUpdate?.available == true {
-                Button(model.isPushingTopologyUpdate ? "推送中" : "更新已接入节点（\(model.relaySync?.count ?? 0)）") {
+                Button(model.isPushingTopologyUpdate ? "推送中" : "发送升级通知（\(model.updateOfferDevices.count) 台）") {
                     model.pushLatestUpdateToTopology()
                 }
                 .buttonStyle(SecondaryButtonStyle())
                 .disabled(
                     model.isPushingTopologyUpdate
                     || model.isInstallingAppUpdate
-                    || (model.relaySync?.count ?? 0) == 0
+                    || model.updateOfferDevices.isEmpty
                     || model.releaseUpdate?.topologyDeploymentReady != true
                 )
             }

@@ -108,7 +108,7 @@ extension AppModel {
                     agentSelection.succeed(Set(selected))
                 } catch {
                     agentSelection.fail(desired)
-                    agentSaveMessage = "保存失败：\(error.localizedDescription)；已恢复最近确认的选择"
+                    agentSaveMessage = "保存未确认：\(error.localizedDescription)；界面已恢复最近确认的选择，请重试核对实际配置"
                     return
                 }
             }

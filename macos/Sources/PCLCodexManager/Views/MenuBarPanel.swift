@@ -47,8 +47,8 @@ struct MenuBarPanel: View {
                     .lineLimit(1)
 
                 HStack(spacing: 8) {
-                    compactMetric(value: model.doctor?.gateway == true ? "可用" : "待检查", label: "PCL endpoint")
-                    compactMetric(value: "\(model.readyAgentCount)", label: "可用模型")
+                    compactMetric(value: model.routeReady ? "可达" : "待确认", label: "PCL 接入点")
+                    compactMetric(value: "\(model.readyAgentCount)", label: "历史实测通过")
                     compactMetric(value: model.codexIntegrationReady ? "已接入" : "待检查", label: "Codex")
                 }
             }
@@ -82,7 +82,8 @@ struct MenuBarPanel: View {
                 .disabled(model.isRefreshing)
 
                 Button {
-                    model.isDetecting ? model.cancelDetection() : model.detectModels()
+                    if model.isDetecting { model.cancelDetection() }
+                    else { openFullSettings(.models); model.showDetectionConfirmation = true }
                 } label: {
                     Label(model.isDetecting ? "停止检测" : "检测模型", systemImage: model.isDetecting ? "stop.fill" : "waveform.path.ecg")
                         .frame(maxWidth: .infinity)
@@ -170,7 +171,6 @@ struct MenuBarPanel: View {
 
     private func openFullSettings(_ section: AppSection) {
         UserDefaults.standard.set(section.rawValue, forKey: "selectedSection")
-        openSettings()
-        NSApp.activate(ignoringOtherApps: true)
+        SettingsWindowPresenter.shared.show(model)
     }
 }

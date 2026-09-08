@@ -33,13 +33,13 @@ struct HeaderBar: View {
                             .font(.system(size: 13, weight: section == item ? .semibold : .medium))
                             .padding(.horizontal, 15)
                             .padding(.vertical, 8)
-                            .background(section == item ? Color.white.opacity(0.095) : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .background(section == item ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                     }
                     .buttonStyle(.plain)
                 }
             }
             .padding(4)
-            .background(Color.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             Spacer()
 
@@ -58,7 +58,7 @@ struct HeaderBar: View {
                 title: model.routeStatusTitle,
                 active: model.routeReady,
                 symbol: model.routeReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
-            )
+            ).help("仅表示接入配置与接口状态，不代表模型生成请求已通过实测")
             Button {
                 model.refreshAll()
             } label: {
@@ -68,8 +68,8 @@ struct HeaderBar: View {
             .buttonStyle(.plain)
             .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
             .disabled(model.isRefreshing)
-            .rotationEffect(.degrees(model.isRefreshing ? 360 : 0))
-            .animation(model.isRefreshing ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: model.isRefreshing)
+            .help(model.isRefreshing ? "各区域正在检查" : "刷新状态，不修改配置")
+            .accessibilityLabel("刷新状态")
         }
         .padding(.horizontal, 20)
         .padding(.top, 12)

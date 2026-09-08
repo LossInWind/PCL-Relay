@@ -8,14 +8,18 @@ extension AppModel {
     }
 
     func checkAppUpdate(showBanner: Bool) async {
-        guard !isCheckingAppUpdate, !isInstallingAppUpdate else { return }
+        if let running = checkTasks["updates"] { await running.value; return }
+        guard !isInstallingAppUpdate else { return }
         isCheckingAppUpdate = true
         defer { isCheckingAppUpdate = false }
-        do {
+        await check("updates") { [self] in
             let result = try await runCLI(["updates", "status"])
             guard result.exitCode == 0 else { throw commandError(result) }
             let decoded = try BridgeDecode.value(ReleaseUpdateStatus.self, from: result.stdout)
             releaseUpdate = decoded
+            guard decoded.available else {
+                throw NSError(domain: "PCLRelay", code: 1, userInfo: [NSLocalizedDescriptionKey: decoded.error])
+            }
             if showBanner {
                 if decoded.updateAvailable {
                     show("发现 PCL Relay \(decoded.latestVersion)，可从 GitHub Release 升级", .info)
@@ -25,9 +29,8 @@ extension AppModel {
                     show("暂时无法检查 GitHub Release：\(decoded.error)", .error)
                 }
             }
-        } catch {
-            if showBanner { show("检查本机更新失败：\(error.localizedDescription)", .error) }
         }
+        if showBanner, let error = checks["updates"]?.error { show("检查发布版本失败：\(error)", .error) }
     }
 
     func installAppUpdate() {

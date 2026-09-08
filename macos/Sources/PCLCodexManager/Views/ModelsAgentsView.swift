@@ -1,406 +1,200 @@
+import AppKit
 import BridgeCore
 import SwiftUI
 
 struct ModelsAgentsView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var selectedAgent = "pcl_deepseek_pro"
+    @State private var query = ""
+    @State private var agentsOnly = true
     @State private var selectedModel: DiscoveredModel?
-
+    private var visibleModels: [DiscoveredModel] {
+        model.allDiscoveredModels.filter {
+            (!agentsOnly || $0.agentEligible) && (query.isEmpty || "\($0.id) \($0.family) \($0.alias)".localizedCaseInsensitiveContains(query))
+        }
+    }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                AgentFlowCard()
-
-                SectionHeader(
-                    title: "PCL 模型目录",
-                    subtitle: "\(model.readyAgentCount) 个执行可用 · \(model.partialAgentCount) 个部分兼容；点开模型可查看能力详情",
-                    actionTitle: model.isDiscovering ? "正在检查" : "检查更新",
-                    actionSymbol: "arrow.triangle.2.circlepath",
-                    action: model.discoverModels
-                )
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    ForEach(model.allDiscoveredModels) { discovered in
-                        RelayModelCard(model: discovered, status: model.registry?.models[discovered.alias])
-                            .contentShape(Rectangle())
-                            .onTapGesture { selectedModel = discovered }
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("模型与 Agent").font(.title2.weight(.semibold))
+                        Text("选择可供 Codex 使用的 PCL 模型；任务分工仍由主 Agent 决定。")
+                            .font(.subheadline).foregroundStyle(.secondary)
                     }
-                }
-
-                HStack(spacing: 12) {
-                    Button {
-                        model.isDetecting ? model.cancelDetection() : model.detectModels()
-                    } label: {
-                        Label(model.isDetecting ? "停止检测" : "检测已选模型", systemImage: model.isDetecting ? "stop.fill" : "waveform.path.ecg")
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-
                     Spacer()
-                    if let checked = model.registry?.catalogCheckedAt {
-                        Text("目录更新：\(checked)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    Button(model.isDiscovering ? "读取中…" : "刷新模型目录", action: model.discoverModels)
+                        .disabled(model.isDiscovering || model.isSavingAgents || model.isDetecting)
+                    Button(model.isDetecting ? "停止实测" : "能力实测…") {
+                        if model.isDetecting { model.cancelDetection() } else { model.showDetectionConfirmation = true }
+                    }.disabled(model.isSavingAgents || model.isDiscovering)
+                }
+                HStack {
+                    TextField("搜索模型、家族或 Agent 名称", text: $query)
+                        .textFieldStyle(.roundedBorder).frame(maxWidth: 370)
+                    Toggle("仅显示 Agent 模型", isOn: $agentsOnly).toggleStyle(.checkbox)
+                    Spacer()
+                    Text("已启用 \(model.selectedAgents.count) 个").font(.subheadline).foregroundStyle(.secondary)
+                }
+                Text("目录读取不发送生成请求。能力结果为历史实测，不代表此刻所有模型均可调用。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let check = model.checks["models"] {
+                    Text(check.summary).font(.caption).foregroundStyle(check.phase == .failed ? Color.orange : Color.secondary)
+                }
+                if let date = model.registry?.catalogCheckedAt {
+                    Text("目录来源时间：\(date)").font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    if model.isSavingAgents { ProgressView().controlSize(.small) }
+                    Text(model.agentSaveMessage).font(.caption)
+                        .foregroundStyle(model.agentSelection.failed == nil ? Color.secondary : Color.orange)
+                    if model.agentSelection.failed != nil { Button("重试保存", action: model.retryAgentSave) }
+                }
+                VStack(spacing: 0) {
+                    ForEach(visibleModels) { item in
+                        modelRow(item)
+                        if item.id != visibleModels.last?.id { Divider().padding(.leading, 48) }
+                    }
+                    if visibleModels.isEmpty {
+                        Text(model.allDiscoveredModels.isEmpty ? "尚未读取模型目录，请刷新模型目录。" : "没有匹配的模型")
+                            .foregroundStyle(.secondary).padding(28)
                     }
                 }
-
-                if model.isDetecting {
-                    ConsolePanel(text: model.commandLog, title: "模型能力检测")
-                }
-
-                Divider().opacity(0.45)
-
-                HStack(alignment: .top, spacing: 16) {
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
+                if model.isDetecting { ConsolePanel(text: model.commandLog, title: "能力实测结果") }
+                DisclosureGroup("Codex 接入与使用说明") {
                     VStack(alignment: .leading, spacing: 12) {
-                        SectionHeader(title: "启用为 Codex 子 Agent", subtitle: "同一份模型状态直接用于角色启用，不再在另一页重复选择")
-                        ForEach(model.agentOptions) { agent in
-                            AgentToggleCard(
-                                agent: agent,
-                                status: model.registry?.models[agent.id],
-                                enabled: model.selectedAgents.contains(agent.id),
-                                selected: selectedAgent == agent.id,
-                                onSelect: { selectedAgent = agent.id },
-                                onToggle: { model.setAgent(agent.id, enabled: $0) }
-                            )
-                        }
-                    }
-                    .frame(maxWidth: 430)
-
-                    NativeAgentUsageCard(selectedAgent: selectedAgent)
+                        Text("模型 ID 用于选择模型，Agent 名称用于指定角色。子 Agent 沿用任务工作区，无需在这里填写目录。")
+                        Text(model.checks["integration"]?.summary ?? "接入状态尚未检查").foregroundStyle(.secondary)
+                        Button(model.isInstallingIntegration ? "处理中…" : "安装 / 修复 Codex 注册") {
+                            model.installCodexIntegration()
+                        }.disabled(model.isInstallingIntegration || model.isSavingAgents || model.isDetecting || model.isDiscovering)
+                        Text("修复会修改接入配置；正常使用无需重复执行。").foregroundStyle(.secondary)
+                    }.font(.caption).padding(.top, 10)
                 }
-            }
-            .padding(22)
+            }.padding(24)
         }
         .sheet(item: $selectedModel) { item in
-            ModelDetailSheet(model: item, status: model.registry?.models[item.alias], checkedAt: model.registry?.checkedAt)
+            ModelDetailSheet(item: item, status: model.registry?.models[item.alias], checkedAt: model.registry?.checkedAt)
         }
-        .onChange(of: model.selectedAgents) { _, agents in
-            if !agents.contains(selectedAgent), let fallback = model.agentOptions.first(where: { agents.contains($0.id) }) {
-                selectedAgent = fallback.id
+    }
+    private func modelRow(_ item: DiscoveredModel) -> some View {
+        let agent = AgentDefinition(model: item)
+        let status = model.registry?.models[item.alias]
+        return HStack(spacing: 14) {
+            Image(systemName: agent.symbol).font(.title3).foregroundStyle(agent.tint).frame(width: 26)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(item.id).font(.subheadline.weight(.semibold)).textSelection(.enabled)
+                Text("\(item.family) · \(categoryName(item.category))").font(.caption).foregroundStyle(.secondary)
+                if item.agentEligible {
+                    Text(capabilityTitle(status) + (status == nil ? "" : " · " + (model.registry?.checkedAt ?? "检测时间未知")))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let error = status?.error, !error.isEmpty {
+                    Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            Button("详情") { selectedModel = item }
+            if item.agentEligible {
+                Button("复制调用示例") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(agentExample(agent), forType: .string)
+                    model.show("已复制 \(agent.title) 调用示例", .info)
+                }
+                Toggle("启用 \(item.id)", isOn: Binding(
+                    get: { model.selectedAgents.contains(item.alias) },
+                    set: { model.setAgent(item.alias, enabled: $0) }))
+                    .labelsHidden().toggleStyle(.switch)
+                    .disabled(model.isDiscovering || model.isDetecting || model.isInstallingIntegration)
+            } else {
+                Text("非 Agent").font(.caption).foregroundStyle(.secondary).frame(width: 60)
             }
-        }
-        .onChange(of: model.agentOptions) { _, options in
-            if !options.contains(where: { $0.id == selectedAgent }), let fallback = options.first(where: { model.selectedAgents.contains($0.id) }) {
-                selectedAgent = fallback.id
-            }
-        }
+        }.padding(14)
     }
 }
 
-private struct AgentFlowCard: View {
+struct ModelDetectionConfirmation: View {
     @EnvironmentObject private var model: AppModel
-
+    @Environment(\.dismiss) private var dismiss
     var body: some View {
-        GlassCard {
-            HStack(spacing: 14) {
-                FlowNode(symbol: "sparkles", title: "官方 GPT", detail: "登录与模型选择保留", color: .green)
-                FlowArrow()
-                FlowNode(symbol: "arrow.triangle.branch", title: "PCL Relay 路由", detail: "一个 App 内置", color: .blue)
-                FlowArrow()
-                FlowNode(symbol: "person.3.sequence.fill", title: "原生子 Agent", detail: "过程显示在 Codex", color: .purple)
-                Spacer()
-                VStack(alignment: .trailing, spacing: 8) {
-                    StatusPill(title: model.codexIntegrationReady ? "原生角色已就绪" : "需要安装", active: model.codexIntegrationReady, symbol: "arrow.triangle.branch")
-                    Button(model.codexIntegrationReady ? "修复注册" : "安装到 Codex") {
-                        model.installCodexIntegration()
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
-                }
-            }
-        }
-    }
-}
-
-private struct NativeAgentUsageCard: View {
-    @EnvironmentObject private var model: AppModel
-    let selectedAgent: String
-
-    private var selected: AgentDefinition? {
-        model.agentOptions.first { $0.id == selectedAgent }
-    }
-
-    private var nativeRoleName: String {
-        selected?.nativeRoleName ?? selectedAgent.replacingOccurrences(of: "_", with: "-")
-    }
-
-    var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 15) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("在 Codex 中直接使用").font(.headline)
-                    Text("不再启动外部 codex exec，也不需要手动填写工作区。子 Agent 自动继承主任务的当前工作区和权限。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 10) {
-                    Image(systemName: selected?.symbol ?? "person.3.fill")
-                        .foregroundStyle(selected?.tint ?? .purple)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(selected?.title ?? selectedAgent).font(.subheadline.weight(.semibold))
-                        Text("原生模型 ID：pcl/\(selected?.model ?? "")")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
+        VStack(alignment: .leading, spacing: 16) {
+            Text("确认能力实测").font(.title2.weight(.semibold))
+            Text("将对以下已启用模型发送普通对话、流式输出和工具调用测试。会消耗少量 API 额度；不会修改项目文件。")
+            ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("示例").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    NativePromptExample(text: "让 \(nativeRoleName) 实现这个功能，并运行测试；完成后由你复核。")
-                    NativePromptExample(text: "启动多个 \(nativeRoleName) 子 Agent，并行处理边界清晰的子任务。")
-                }
-
-                Divider().opacity(0.35)
-                Label("运行时会像 Codex 自带子 Agent 一样显示创建、进度和结果。", systemImage: "eye.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    ForEach(model.agentOptions.filter { model.selectedAgents.contains($0.id) }) { agent in
+                        Label(agent.model, systemImage: "checkmark.circle")
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 220)
+            Text("仅查看目录无需实测。价格由上游决定，应用不估算未知费用。")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("开始实测") { dismiss(); model.detectModels() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isDetecting || model.isSavingAgents || model.isDiscovering || model.selectedAgents.isEmpty)
             }
-        }
-        .frame(maxWidth: .infinity)
+        }.padding(24).frame(width: 520)
     }
 }
 
-private struct NativePromptExample: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.system(.caption, design: .monospaced))
-            .textSelection(.enabled)
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 9))
-    }
+private func categoryName(_ value: String) -> String {
+    ["chat": "文本生成", "embedding": "向量", "reranker": "重排序", "speech": "语音", "vision-ocr": "视觉 OCR", "image": "图像"][value] ?? value
 }
-
-private struct RelayModelCard: View {
-    let model: DiscoveredModel
-    let status: RelayModelStatus?
-
-    private var agent: AgentDefinition { AgentDefinition(model: model) }
-
-    var body: some View {
-        GlassCard {
-            HStack(alignment: .top, spacing: 13) {
-                Image(systemName: agent.symbol)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(agent.tint)
-                    .frame(width: 42, height: 42)
-                    .background(agent.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(agent.title).font(.headline)
-                            Text("\(model.family) · \(categoryName)").font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if model.agentEligible {
-                            AvailabilityPill(status: status)
-                        } else {
-                            Text("非 Agent")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(Color.white.opacity(0.06), in: Capsule())
-                        }
-                    }
-                    Text(model.description)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                    if model.agentEligible {
-                        HStack(spacing: 6) {
-                            MiniBadge("对话", active: status?.chat == true)
-                            MiniBadge("流式", active: status?.stream == true)
-                            MiniBadge("工具", active: status?.toolCompatible == true)
-                            if model.recommended { Text("推荐").font(.caption2).foregroundStyle(.green) }
-                            if let mode = status?.toolCallMode, mode != "unavailable" {
-                                Text(mode == "native" ? "原生工具" : "兼容工具")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    } else {
-                        Text("不适用于文本执行 Agent")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    if let error = status?.error, !error.isEmpty {
-                        Text(error).font(.caption2).foregroundStyle(.orange).lineLimit(2)
-                    }
-                }
-            }
-        }
-    }
-
-    private var categoryName: String {
-        switch model.category {
-        case "chat": return "文本生成"
-        case "embedding": return "向量"
-        case "reranker": return "重排序"
-        case "speech": return "语音"
-        case "vision-ocr": return "视觉 OCR"
-        case "image": return "图像"
-        default: return model.category
-        }
-    }
+private func capabilityTitle(_ status: RelayModelStatus?) -> String {
+    guard let status else { return "尚未实测" }
+    if status.executionReady { return "最近实测通过" }
+    return status.chat || status.stream == true || status.toolCompatible == true ? "最近实测部分通过" : "最近实测失败"
 }
-
-private struct AvailabilityPill: View {
-    let status: RelayModelStatus?
-
-    private var value: (String, Color, String) {
-        guard let status else { return ("未检测", .secondary, "questionmark.circle.fill") }
-        if status.executionReady { return ("可用", .green, "checkmark.circle.fill") }
-        if status.chat || status.stream == true || status.toolCompatible == true {
-            return ("部分兼容", .orange, "exclamationmark.circle.fill")
-        }
-        return ("不可用", .red, "xmark.circle.fill")
-    }
-
-    var body: some View {
-        Label(value.0, systemImage: value.2)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(value.1)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(value.1.opacity(0.11), in: Capsule())
-    }
+private func agentExample(_ agent: AgentDefinition) -> String {
+    "让 \(agent.nativeRoleName)（模型 pcl/\(agent.model)）处理一个边界清晰的子任务，沿用当前工作区，完成后汇报修改和测试结果，由你最终复核。"
 }
 
 private struct ModelDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let model: DiscoveredModel
+    let item: DiscoveredModel
     let status: RelayModelStatus?
     let checkedAt: String?
-
+    @State private var copied = false
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 13) {
-                Image(systemName: AgentDefinition(model: model).symbol)
-                    .font(.system(size: 24, weight: .medium))
-                    .foregroundStyle(AgentDefinition(model: model).tint)
-                    .frame(width: 52, height: 52)
-                    .background(AgentDefinition(model: model).tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 13))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.id).font(.title2.weight(.semibold))
-                    Text(model.description).foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            GlassCard {
-                VStack(spacing: 10) {
-                    DetailRow(label: "Agent 别名", value: model.alias)
-                    DetailRow(label: "模型家族", value: model.family)
-                    DetailRow(label: "模型类型", value: categoryName)
-                    DetailRow(label: "输入模态", value: model.inputModalities.joined(separator: "、"))
-                    DetailRow(label: "Codex 子 Agent", value: model.agentEligible ? "可以选择" : "不适用")
-                    if model.agentEligible {
-                        DetailRow(label: "可用性", value: availabilityText)
-                        DetailRow(label: "最近检测", value: checkedAt ?? "尚未检测")
+            Text(item.id).font(.title2.weight(.semibold))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(item.description).foregroundStyle(.secondary)
+                    LabeledContent("模型 ID", value: "pcl/\(item.id)")
+                    LabeledContent("Agent 名称", value: item.agentEligible ? AgentDefinition(model: item).nativeRoleName : "不适用")
+                    LabeledContent("模型家族", value: item.family)
+                    LabeledContent("模型类型", value: categoryName(item.category))
+                    LabeledContent("输入模态", value: item.inputModalities.joined(separator: "、"))
+                    if item.agentEligible {
+                        LabeledContent("能力记录", value: capabilityTitle(status))
+                        LabeledContent("实测时间", value: checkedAt ?? "未知")
+                        HStack {
+                            MiniBadge("对话", active: status?.chat == true)
+                            MiniBadge("流式", active: status?.stream == true)
+                            MiniBadge("工具", active: status?.toolCompatible == true)
+                        }
+                        Text(agentExample(AgentDefinition(model: item))).font(.callout)
                     }
-                    DetailRow(label: "网关标记", value: model.ownedBy)
-                }
-            }
-
-            if model.agentEligible {
-                HStack(spacing: 8) {
-                    MiniBadge("普通对话", active: status?.chat == true)
-                    MiniBadge("SSE 流式", active: status?.stream == true)
-                    MiniBadge("工具调用", active: status?.toolCompatible == true)
-                    if let mode = status?.toolCallMode, mode != "unavailable" {
-                        Text(mode == "native" ? "原生 function calling" : "JSON 兼容层")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-
-            if let error = status?.error, !error.isEmpty {
-                Text("检测详情：\(error)")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .textSelection(.enabled)
-            }
-
-            Text("PCL 的 /v1/models 当前未返回上下文窗口、速率限制或计费信息，因此应用不会猜测这些字段。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
+                    if let error = status?.error, !error.isEmpty { Text(error).foregroundStyle(.orange) }
+                    Text("上游未提供的上下文窗口、价格和速率限制显示为未知，不根据模型名称猜测。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.textSelection(.enabled)
+            }.frame(maxHeight: 460)
             HStack {
-                Spacer()
-                Button("完成") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(PrimaryButtonStyle())
-            }
-        }
-        .padding(24)
-        .frame(width: 620)
-        .preferredColorScheme(.dark)
-    }
-
-    private var categoryName: String {
-        switch model.category {
-        case "chat": return "文本生成"
-        case "embedding": return "向量"
-        case "reranker": return "重排序"
-        case "speech": return "语音识别"
-        case "vision-ocr": return "视觉 OCR"
-        case "image": return "图像生成/编辑"
-        default: return model.category
-        }
-    }
-
-    private var availabilityText: String {
-        guard let status else { return "未检测" }
-        if status.executionReady { return "可用" }
-        if status.chat || status.stream == true || status.toolCompatible == true { return "部分兼容" }
-        return "不可用"
-    }
-}
-
-private struct DetailRow: View {
-    let label: String
-    let value: String
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.secondary)
-            Spacer()
-            Text(value).font(.system(.body, design: label == "Agent 别名" ? .monospaced : .default))
-                .textSelection(.enabled)
-        }
-    }
-}
-
-private struct AgentToggleCard: View {
-    let agent: AgentDefinition
-    let status: RelayModelStatus?
-    let enabled: Bool
-    let selected: Bool
-    let onSelect: () -> Void
-    let onToggle: (Bool) -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: agent.symbol)
-                .foregroundStyle(agent.tint)
-                .frame(width: 34, height: 34)
-                .background(agent.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Text(agent.title).font(.subheadline.weight(.semibold))
-                    StatusDot(active: status?.executionReady == true)
+                if item.agentEligible {
+                    Button(copied ? "已复制" : "复制调用示例") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(agentExample(AgentDefinition(model: item)), forType: .string)
+                        copied = true
+                    }
                 }
-                Text(agent.detail).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
             }
-            Spacer()
-            Toggle("", isOn: Binding(get: { enabled }, set: onToggle))
-                .labelsHidden()
-                .toggleStyle(.switch)
-        }
-        .padding(12)
-        .background(selected ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? Color.accentColor.opacity(0.55) : Color.white.opacity(0.07)))
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
+        }.padding(24).frame(width: 600)
     }
 }

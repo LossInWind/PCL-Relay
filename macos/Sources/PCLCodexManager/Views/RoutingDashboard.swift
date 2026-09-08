@@ -25,6 +25,7 @@ struct RoutingOverview: View {
                 Label("\(model.routingDevices.filter(\.needsRestart).count) 台待完成升级", systemImage: "shippingbox")
                 Spacer()
             }.font(.subheadline)
+            Text(model.buildIdentity).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
             if let error = model.routingCheckError {
                 Label(error, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
             } else if let date = model.routingCheckedAt {
@@ -55,7 +56,7 @@ struct RoutingDeviceList: View {
             }
             VStack(spacing: 0) {
                 ForEach(model.routingDevices) { device in
-                    deviceRow(device)
+                    deviceRow(device).id(device.id)
                     if device.id != model.routingDevices.last?.id { Divider().padding(.leading, 48) }
                 }
             }
@@ -74,7 +75,7 @@ struct RoutingDeviceList: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(device.name).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                        Text(device.connectionTitle).font(.caption).foregroundStyle(.secondary)
+                        Text("\(device.connectionTitle) · \(device.installationTitle)").font(.caption).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityLabel("\(device.name)，展开设备详情")
                 Label(device.versionTitle, systemImage: device.needsRestart ? "arrow.clockwise.circle" : "circle.fill")
@@ -91,12 +92,16 @@ struct RoutingDeviceList: View {
                     ForEach(device.peers) { peer in
                         Button("移除同步关系：\(peer.name)") { Task { await model.removeRelaySyncPeer(peer) } }
                     }
-                } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).frame(width: 28)
+                } label: { Text("更多") }.menuStyle(.borderlessButton).frame(width: 44)
             }
             if model.selectedRoutingDeviceID == device.id {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(device.isLocal || device.runtime?.configuredEndpoint != nil ? "模型路径见上方；配置与接口检测不等同于模型调用验收。" : "模型路径：未确认。当前心跳只证明控制服务可达，不推测该设备经过哪个中转站。")
+                    Text(device.isLocal || device.runtime?.configuredEndpoint != nil ? "模型路径见下方展开区；配置与接口检测不等同于模型调用验收。" : "模型路径：未确认。当前心跳只证明控制服务可达，不推测该设备经过哪个中转站。")
                         .font(.callout)
+                    Text(device.updateReason)
+                    if let check = model.checks["device:\(device.id)"] ?? model.checks[device.targets.isEmpty ? "sync" : "devices"] {
+                        Text(check.summary).foregroundStyle(check.phase == .failed ? Color.orange : Color.secondary)
+                    }
                     LabeledContent(device.isLocal ? "当前应用版本" : "后台同步版本", value: device.runningVersion ?? "未知")
                     LabeledContent("磁盘安装版本", value: device.isLocal ? model.routingRuntime?.installedVersion ?? "未知" : device.installedVersion ?? device.runtime?.installedVersion ?? "未知")
                     LabeledContent("OpenCodex 运行版本", value: (device.isLocal ? model.routingRuntime : device.runtime)?.opencodexVersion ?? "尚未报告")
@@ -117,7 +122,7 @@ struct RoutingDeviceList: View {
                         LabeledContent("同步地址", value: peer.url)
                         if !peer.error.isEmpty { Text(peer.error).foregroundStyle(.orange).textSelection(.enabled) }
                     }
-                }.font(.caption).foregroundStyle(.secondary).padding(.leading, 38)
+                }.font(.caption).foregroundStyle(.secondary).padding(.leading, 38).textSelection(.enabled)
             }
         }.padding(16)
     }

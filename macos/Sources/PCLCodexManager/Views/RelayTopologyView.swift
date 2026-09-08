@@ -6,7 +6,8 @@ struct RelayTopologyCanvas: View {
     @EnvironmentObject private var model: AppModel
     private var current: GatewayRouteRecord? { model.gatewayRoutes?.gateways.first(where: \.selected) }
     private var verifiedEndpointRoute: GatewayRouteRecord? {
-        guard let configured = model.routingRuntime?.configuredEndpoint, let current,
+        guard model.checks["routes"]?.phase == .succeeded,
+              let configured = model.routingRuntime?.configuredEndpoint, let current,
               RoutingSnapshot.sameEndpoint(configured, current.url) else { return nil }
         return current
     }
@@ -61,7 +62,8 @@ struct RelayTopologyCanvas: View {
                                 node("PCL 接入点", detail: endpoint, symbol: "arrow.triangle.branch", color: .purple) {
                                     model.selectedRoutingDeviceID = device.id
                                 }
-                                Text("设备报告的配置\n模型调用未验证").font(.caption).foregroundStyle(.secondary)
+                                Text("设备报告的配置 · \(device.runtime?.checkedAt ?? "时间未知")\n模型调用未验证")
+                                    .font(.caption).foregroundStyle(.secondary)
                             } else {
                                 Text("路径未确认 · 设备未报告模型接入点").font(.caption).foregroundStyle(.secondary)
                             }

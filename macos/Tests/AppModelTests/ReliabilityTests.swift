@@ -44,7 +44,7 @@ final class ReliabilityTests: XCTestCase {
         await waitUntil { !model.isSavingAgents }
         XCTAssertEqual(model.selectedAgents, initial)
         XCTAssertNotNil(model.agentSelection.failed)
-        XCTAssertTrue(model.agentSaveMessage.contains("失败"))
+        XCTAssertTrue(model.agentSaveMessage.contains("未确认"))
         model.commandOverride = { _ in CommandResult(stdout: self.registry(["pcl_deepseek_pro", "pcl_glm"]), stderr: "", exitCode: 0) }
         model.retryAgentSave()
         await waitUntil { !model.isSavingAgents }
@@ -96,5 +96,30 @@ final class ReliabilityTests: XCTestCase {
         await Task.yield()
         resume?.resume(); await a.value; await b.value
         XCTAssertEqual(calls, 1)
+    }
+    func testDetectionBlocksSelectionAndDoesNotRunOnShowConfirmation() {
+        let model = AppModel(); model.selectedAgents = initial
+        model.showDetectionConfirmation = true
+        XCTAssertFalse(model.isDetecting)
+        model.isDetecting = true
+        model.setAgent("pcl_glm", enabled: true)
+        XCTAssertEqual(model.selectedAgents, initial)
+        XCTAssertFalse(model.isSavingAgents)
+    }
+    func testDuplicateRepairIsBlocked() async {
+        let model = AppModel()
+        var requests = 0
+        var pending: CheckedContinuation<Void, Never>?
+        model.commandOverride = { _ in
+            requests += 1
+            await withCheckedContinuation { pending = $0 }
+            return CommandResult(stdout: "", stderr: "fixture failure", exitCode: 1)
+        }
+        model.installCodexIntegration()
+        await waitUntil { pending != nil }
+        model.installCodexIntegration()
+        XCTAssertEqual(requests, 1)
+        pending?.resume()
+        await waitUntil { !model.isInstallingIntegration }
     }
 }

@@ -13,7 +13,8 @@ extension AppModel {
             let catalog = try BridgeDecode.value(GatewayRouteCatalog.self, from: result.stdout)
             gatewayRoutes = catalog
             let snapshot = try await runCLI(["routes", "snapshot"])
-            if snapshot.exitCode == 0 { routingRuntime = try? BridgeDecode.value(RoutingRuntime.self, from: snapshot.stdout) }
+            guard snapshot.exitCode == 0 else { throw commandError(snapshot) }
+            routingRuntime = try BridgeDecode.value(RoutingRuntime.self, from: snapshot.stdout)
             if !catalog.gateways.contains(where: { $0.id == selectedGatewayID }) {
                 selectedGatewayID = catalog.gateways.first(where: \.selected)?.id
             }

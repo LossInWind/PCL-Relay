@@ -49,3 +49,41 @@ Local acceptance only. Keep the previous signed application for rollback; rollba
 must not restore old user preferences or overwrite user projects. Do not push the
 new UI/control package to other devices automatically. A later full release should
 use the canonical component version and include `PCLBuildCommit` in its app bundle.
+
+## Local acceptance record — 2026-09-08
+
+- Installed `/Applications/PCL Relay.app`: component version `2.5.12`, GUI build
+  `7f457a0`, GUI-only update. Reliability commit: `cd67d26`; UI commit: `7f457a0`.
+- Previous signed app retained at
+  `.build/app-install-backups/PCL Relay.app.before-ui-7f457a0`.
+- Passed: 31 Swift tests, 205 Python tests, shell syntax, whitespace checks,
+  release build and strict/deep code-signature verification. Packaged OpenCodex
+  and Python runtime trees were unchanged.
+- Inspected isolated light/dark previews at 960×760. Live checks covered all
+  three pages, model search, capability-test confirmation and cancellation
+  (including keyboard shortcut), portal connectivity feedback, upgrade recipient
+  preview, full refresh completion, path-to-device-detail navigation, window close
+  and Finder reopen. No real model-selection writes or remote upgrades were made.
+- Config fingerprints remained identical for Codex config/auth, model registry,
+  OpenCodex config and SSH config. Model-service PID `49816` and its start time
+  `2026-09-08 13:13:08` remained unchanged. Local `/healthz` reported OpenCodex
+  `2.46.0` healthy after GUI replacement and refresh.
+- The snapshot showed five device rows, four online, two pending runtime-version
+  upgrades and BUPT unreachable. No synchronized update peers were registered;
+  the upgrade preview correctly listed zero notification recipients and explained
+  the missing synchronization relationship instead of treating SSH installation
+  as upgrade eligibility.
+
+### Remaining acceptance gate
+
+The configured gateway's model-catalog probe returned HTTP 500 with **both** the
+original and new bundled control CLI. This is an existing endpoint failure, not
+a demonstrated difference introduced by the GUI update. The GUI exposes it rather
+than equating gateway reachability with model-generation health.
+
+No fresh paid generation requests were sent. Historical capability results are
+not fresh end-to-end evidence. Therefore fresh official/PCL generation, streaming,
+tool calls and native-agent traffic are not claimed as accepted in this local UI
+run. Remote deployment and GitHub release remain withheld; investigate the
+catalog endpoint separately before extending rollout. Remote component versions
+and the offline BUPT node were not changed.

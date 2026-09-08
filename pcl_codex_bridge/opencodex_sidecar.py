@@ -868,8 +868,10 @@ def deactivate_sidecar(
         config_home,
         180,
     )
-    if not (restored.get("ok") is True and restored.get("desiredEnabled") is False):
-        raise RuntimeError("OpenCodex did not restore native Codex")
+    if not (restored.get("ok") is True and restored.get("desiredEnabled") is False
+            and restored.get("state") == "absent"
+            and restored.get("reason") != "restore_incomplete"):
+        raise RuntimeError("OpenCodex did not restore native Codex: " + str(restored.get("message") or restored.get("state")))
     return {
         "active": False,
         "sidecar_stopped": False,

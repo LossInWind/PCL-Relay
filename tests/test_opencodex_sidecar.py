@@ -501,6 +501,15 @@ class OpenCodexSidecarTests(unittest.TestCase):
 
             self.assertEqual(sidecar_health(runtime, Path(temp), runner)["pid"], 45)
 
+    def test_restore_intent_without_restored_artifacts_is_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))
+            def runner(_runtime, arguments, _home, _timeout):
+                return subprocess.CompletedProcess(arguments, 0,
+                    stdout='{"ok":true,"desiredEnabled":false,"state":"unsafe","reason":"restore_incomplete"}', stderr="")
+            with self.assertRaisesRegex(RuntimeError, "did not restore"):
+                deactivate_sidecar(runtime, config_home=Path(temp), runner=runner)
+
     def test_integration_status_uses_durable_and_applied_open_codex_state(self):
         with tempfile.TemporaryDirectory() as temp:
             runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))

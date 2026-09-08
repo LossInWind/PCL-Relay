@@ -3,4 +3,5 @@ set -eu
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export PYTHONPATH="$BASE${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONDONTWRITEBYTECODE=1
+cd "$BASE"
 exec python3 -m pcl_codex_bridge.cli "$@"

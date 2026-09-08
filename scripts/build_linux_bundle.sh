@@ -66,7 +66,9 @@ ARCHIVE="$DIST/$BUNDLE_NAME.tar.gz"
 mkdir -p "$RUNTIME/bin"
 cp "$(realpath "$RUNTIME_BUN")" "$RUNTIME/bin/bun"
 chmod 755 "$RUNTIME/bin/bun"
-rsync -a \
+# Materialize dependency links: remote extraction intentionally rejects links
+# so a release cannot escape its installation root through link traversal.
+rsync -aL \
   "$OPENCODEX_SOURCE/src" \
   "$OPENCODEX_SOURCE/bin" \
   "$OPENCODEX_SOURCE/gui" \
@@ -99,6 +101,15 @@ PYTHONPATH="$BUNDLE" python3 -c 'from pcl_codex_bridge.opencodex_sidecar import 
 
 rm -f "$ARCHIVE" "$ARCHIVE.sha256"
 tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -czf "$ARCHIVE" -C "$STAGING_PARENT" "$BUNDLE_NAME"
+python3 - "$ARCHIVE" <<'PY'
+import sys, tarfile
+from pathlib import PurePosixPath
+with tarfile.open(sys.argv[1], 'r:gz') as archive:
+    for member in archive.getmembers():
+        path = PurePosixPath(member.name)
+        if path.is_absolute() or '..' in path.parts or not (member.isdir() or member.isfile()):
+            raise SystemExit('Unsafe or linked release member: ' + member.name)
+PY
 (cd "$DIST" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
 
 echo "$ARCHIVE"

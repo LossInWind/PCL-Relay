@@ -287,7 +287,7 @@ def remove_target(target_id: str) -> Dict[str, Any]:
 
 
 REMOTE_BOOTSTRAP = r'''
-import hashlib, io, json, os, pathlib, platform, plistlib, shutil, subprocess, sys, tarfile, tempfile, urllib.request
+import hashlib, io, json, os, pathlib, platform, plistlib, shutil, subprocess, sys, tarfile, tempfile, time, urllib.request
 
 manifest = json.loads(__PCL_MANIFEST__)
 peer_fallback = __PCL_PEER_FALLBACK__
@@ -311,8 +311,19 @@ if peer_fallback:
 else:
     try:
         request = urllib.request.Request(asset["asset_url"], headers={"User-Agent": "PCL-Relay-bootstrap"})
-        with urllib.request.urlopen(request, timeout=120) as response:
-            archive_data = response.read(expected_size + 1)
+        deadline = time.monotonic() + 120
+        with urllib.request.urlopen(request, timeout=30) as response:
+            chunks = []
+            received = 0
+            while received <= expected_size:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("GitHub download exceeded the 120-second total budget")
+                chunk = response.read(min(65536, expected_size + 1 - received))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                received += len(chunk)
+            archive_data = b"".join(chunks)
         source = "github"
     except Exception as exc:
         print(json.dumps({"needs_peer_fallback": True, "error": type(exc).__name__ + ": " + str(exc)}))

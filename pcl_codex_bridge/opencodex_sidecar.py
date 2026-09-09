@@ -160,6 +160,13 @@ def _writable_staging_directories(root: Path) -> None:
 def installed_runtime(
     install_home: Path = OPENCODEX_INSTALL_HOME,
 ) -> OpenCodexRuntime:
+    # Staging deliberately leaves `current` and the live process untouched.
+    # Use this release's verified CLI for control operations while health reports
+    # the actual running version separately; never mistake the old symlink for
+    # a corrupt new package or silently activate it during a read.
+    staged = install_home / "releases" / OPENCODEX_RELEASE_ID
+    if staged.exists():
+        return runtime_at(staged)
     return runtime_at(install_home / "current")
 
 

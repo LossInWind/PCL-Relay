@@ -11,6 +11,7 @@ from pcl_codex_bridge.opencodex_sidecar import (
     OPENCODEX_DEFAULT_PORT,
     OPENCODEX_RELEASE_ID,
     OPENCODEX_VERSION,
+    installed_runtime,
     activate_sidecar,
     apply_pending_opencodex_proxy_policy,
     configure_sidecar,
@@ -48,6 +49,16 @@ def fake_runtime(root: Path) -> Path:
 
 
 class OpenCodexSidecarTests(unittest.TestCase):
+    def test_staged_new_cli_is_usable_without_changing_old_current_link(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            old = fake_runtime(home / "releases" / "old")
+            (old / "UPSTREAM.json").write_text('{"version":"1.0.0","commit":"old"}')
+            new = fake_runtime(home / "releases" / OPENCODEX_RELEASE_ID)
+            (home / "current").symlink_to(old)
+            self.assertEqual(installed_runtime(home).root, new.resolve())
+            self.assertEqual((home / "current").resolve(), old.resolve())
+
     def test_source_package_and_build_scripts_share_the_upstream_pin(self):
         root = Path(__file__).resolve().parents[1]
         manifest = json.loads((root / "vendor/opencodex.UPSTREAM.json").read_text())

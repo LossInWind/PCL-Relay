@@ -1,8 +1,8 @@
 This distribution embeds the complete pinned OpenCodex source tree and runtime:
   upstream: https://github.com/lidge-jun/opencodex
-  version: 2.46.0
-  commit: bba63222d3eeb5c8e397edae35798225e4fa1a6f
-  tree: 068c7640eec7e0fb5bd737920e6b163630e50d6f
+  version: 2.48.0
+  commit: 9a27e86992d7a014e0aa92c046199b9fac148201
+  tree: a5148ad2f35df6d8ff1e1802e8aac6902f0a5e36
   license: MIT
 
 The exact provenance is recorded in vendor/opencodex.UPSTREAM.json. The full

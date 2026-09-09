@@ -48,6 +48,18 @@ def fake_runtime(root: Path) -> Path:
 
 
 class OpenCodexSidecarTests(unittest.TestCase):
+    def test_source_package_and_build_scripts_share_the_upstream_pin(self):
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root / "vendor/opencodex.UPSTREAM.json").read_text())
+        package = json.loads((root / "vendor/opencodex/package.json").read_text())
+        self.assertEqual(manifest["version"], OPENCODEX_VERSION)
+        self.assertEqual(package["version"], OPENCODEX_VERSION)
+        self.assertEqual(manifest["commit"], OPENCODEX_COMMIT)
+        for name in ("build_macos_app.sh", "build_linux_bundle.sh"):
+            script = (root / "scripts" / name).read_text()
+            self.assertIn(f'OPENCODEX_COMMIT="{manifest["commit"]}"', script)
+            self.assertIn(f'OPENCODEX_TREE="{manifest["tree"]}"', script)
+
     def test_service_install_pins_runtime_not_build_dependency(self):
         with tempfile.TemporaryDirectory() as temp:
             runtime = runtime_at(fake_runtime(Path(temp) / "runtime"))

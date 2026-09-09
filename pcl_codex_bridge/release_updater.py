@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from . import __version__
+from .opencodex_sidecar import OPENCODEX_COMMIT, OPENCODEX_VERSION
 
 
 REPOSITORY = "LossInWind/PCL-Relay"
@@ -442,9 +443,9 @@ def _verify_linux_bundle(bundle: Path, expected_version: str) -> None:
         raise RuntimeError(f"Downloaded bundle version mismatch: expected {expected_version}, got {version}")
     manifest = json.loads((bundle / "opencodex" / "UPSTREAM.json").read_text(encoding="utf-8"))
     package = json.loads((bundle / "opencodex" / "package.json").read_text(encoding="utf-8"))
-    if manifest.get("commit") != "bba63222d3eeb5c8e397edae35798225e4fa1a6f":
+    if manifest.get("commit") != OPENCODEX_COMMIT:
         raise RuntimeError("Downloaded bundle has an unexpected OpenCodex commit")
-    if manifest.get("version") != "2.46.0" or package.get("version") != "2.46.0":
+    if manifest.get("version") != OPENCODEX_VERSION or package.get("version") != OPENCODEX_VERSION:
         raise RuntimeError("Downloaded bundle has an unexpected OpenCodex version")
     runtime = subprocess.run(
         [str(bundle / "opencodex" / "bin" / "bun"), "--version"],

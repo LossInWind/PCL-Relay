@@ -326,13 +326,16 @@ private struct LocalReleaseUpdateStrip: View {
             Spacer()
             Button(model.isCheckingAppUpdate ? "检查中" : "检查更新") { model.refreshAppUpdate() }
                 .buttonStyle(QuietButtonStyle()).disabled(model.isCheckingAppUpdate || model.isInstallingAppUpdate)
-            if model.releaseUpdate?.available == true {
+            // Keep the action visible when release discovery fails; hiding it
+            // makes a rate-limited check look like a nonfunctional upgrade panel.
+            Group {
                 Button(model.isPushingTopologyUpdate ? "推送中" : "发送升级通知（\(model.updateOfferDevices.count) 台）") {
                     model.pushLatestUpdateToTopology()
                 }
                 .buttonStyle(SecondaryButtonStyle())
                 .disabled(
                     model.isPushingTopologyUpdate
+                    || model.releaseUpdate?.available != true
                     || model.isInstallingAppUpdate
                     || model.updateOfferDevices.isEmpty
                     || model.releaseUpdate?.topologyDeploymentReady != true

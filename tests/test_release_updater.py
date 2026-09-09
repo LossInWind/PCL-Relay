@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import hashlib
 import os
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -9,6 +10,9 @@ from pcl_codex_bridge.release_updater import (
     LINUX_AARCH64_ASSET_NAME,
     LINUX_X86_64_ASSET_NAME,
     MAC_ASSET_NAME,
+    RELEASE_API,
+    RELEASE_METADATA_URL,
+    _latest_release_metadata,
     _expected_digest,
     _version_tuple,
     cache_release_asset,
@@ -20,6 +24,35 @@ from pcl_codex_bridge.release_updater import (
 
 
 class ReleaseUpdaterTests(unittest.TestCase):
+    def test_rate_limit_falls_back_to_public_release_metadata_without_credentials(self):
+        release = {"tag_name": "v2.5.14", "assets": [{
+            "name": MAC_ASSET_NAME,
+            "browser_download_url": "https://github.com/LossInWind/PCL-Relay/releases/download/v2.5.14/" + MAC_ASSET_NAME,
+            "size": 42,
+        }]}
+        error = urllib.error.HTTPError(RELEASE_API, 403, "rate limit exceeded", {}, None)
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "pcl_codex_bridge.release_updater._read_json", side_effect=[error, release]
+        ) as read:
+            self.assertEqual(_latest_release_metadata(), release)
+            self.assertEqual(read.call_args_list, [mock.call(RELEASE_API), mock.call(RELEASE_METADATA_URL)])
+
+    def test_static_metadata_rejects_foreign_download_url(self):
+        error = urllib.error.HTTPError(RELEASE_API, 429, "rate limit", {}, None)
+        release = {"tag_name": "v2.5.14", "assets": [{"name": MAC_ASSET_NAME, "browser_download_url": "https://other.test/app.zip"}]}
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "pcl_codex_bridge.release_updater._read_json", side_effect=[error, release]
+        ), self.assertRaisesRegex(RuntimeError, "public release metadata unavailable"):
+            _latest_release_metadata()
+
+    def test_custom_release_source_does_not_silently_fall_back(self):
+        error = urllib.error.HTTPError("https://custom.test", 403, "denied", {}, None)
+        with mock.patch.dict(os.environ, {"PCL_RELAY_RELEASE_API": "https://custom.test"}), mock.patch(
+            "pcl_codex_bridge.release_updater._read_json", side_effect=error
+        ) as read, self.assertRaises(urllib.error.HTTPError):
+            _latest_release_metadata()
+        read.assert_called_once_with("https://custom.test")
+
     def test_version_comparison_ignores_v_prefix_and_prerelease_suffix(self):
         self.assertGreater(_version_tuple("v2.2.0"), _version_tuple("2.1.9"))
         self.assertEqual(_version_tuple("2.2.0-beta.1"), (2, 2, 0))

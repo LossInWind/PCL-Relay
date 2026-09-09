@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import tempfile
 import tarfile
 import time
 import urllib.request
+import urllib.error
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -23,6 +25,7 @@ from .opencodex_sidecar import OPENCODEX_COMMIT, OPENCODEX_VERSION
 
 REPOSITORY = "LossInWind/PCL-Relay"
 RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+RELEASE_METADATA_URL = f"https://github.com/{REPOSITORY}/releases/latest/download/release-metadata.json"
 MAC_ASSET_NAME = "PCL-Relay-macOS.zip"
 LINUX_X86_64_ASSET_NAME = "PCL-Relay-linux-x86_64.tar.gz"
 LINUX_AARCH64_ASSET_NAME = "PCL-Relay-linux-aarch64.tar.gz"
@@ -157,6 +160,34 @@ def _read_json(url: str, timeout: int = 20) -> Dict[str, Any]:
     return value
 
 
+def _latest_release_metadata() -> Dict[str, Any]:
+    """API first; public release asset fallback needs no GitHub account or token."""
+    api_url = os.environ.get("PCL_RELAY_RELEASE_API", RELEASE_API)
+    try:
+        return _read_json(api_url)
+    except (urllib.error.URLError, TimeoutError) as exc:
+        if api_url != RELEASE_API:
+            raise
+        if isinstance(exc, urllib.error.HTTPError) and exc.code not in {403, 429, 500, 502, 503, 504}:
+            raise
+        try:
+            release = _read_json(RELEASE_METADATA_URL)
+            tag = str(release.get("tag_name") or "")
+            if not re.fullmatch(r"v\d+\.\d+\.\d+", tag) or release.get("draft") or release.get("prerelease"):
+                raise RuntimeError("Static release metadata is not a stable release")
+            prefix = f"https://github.com/{REPOSITORY}/releases/download/{tag}/"
+            allowed = RELEASE_ASSET_NAMES | {name + ".sha256" for name in RELEASE_ASSET_NAMES}
+            for asset in _assets(release):
+                name = asset.get("name")
+                if name not in allowed or asset.get("browser_download_url") != prefix + str(name):
+                    raise RuntimeError("Static release metadata contains a non-release asset URL")
+            return release
+        except Exception as fallback:
+            raise RuntimeError(
+                f"GitHub API unavailable ({type(exc).__name__}); public release metadata unavailable ({type(fallback).__name__}). Retry later."
+            ) from fallback
+
+
 def _assets(release: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     values = release.get("assets")
     if not isinstance(values, list):
@@ -225,11 +256,10 @@ def _release_asset_status(
 
 
 def latest_release_status(current_version: str = __version__) -> Dict[str, Any]:
-    api_url = os.environ.get("PCL_RELAY_RELEASE_API", RELEASE_API)
     checked_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     try:
         asset_name = release_asset_name()
-        release = _read_json(api_url)
+        release = _latest_release_metadata()
         return _release_asset_status(release, asset_name, current_version, checked_at)
     except Exception as exc:
         return {
@@ -254,9 +284,8 @@ def latest_release_status(current_version: str = __version__) -> Dict[str, Any]:
 
 def latest_release_manifest(current_version: str = __version__) -> Dict[str, Any]:
     """Resolve immutable platform metadata before broadcasting an update offer."""
-    api_url = os.environ.get("PCL_RELAY_RELEASE_API", RELEASE_API)
     checked_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    release = _read_json(api_url)
+    release = _latest_release_metadata()
     assets: Dict[str, Dict[str, Any]] = {}
     with tempfile.TemporaryDirectory(prefix="pcl-relay-release-manifest-") as temporary:
         directory = Path(temporary)

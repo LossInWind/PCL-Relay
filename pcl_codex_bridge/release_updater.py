@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import hmac
 import json
 import os
@@ -20,7 +21,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from . import __version__
-from .opencodex_sidecar import OPENCODEX_COMMIT, OPENCODEX_VERSION
 
 
 REPOSITORY = "LossInWind/PCL-Relay"
@@ -460,6 +460,7 @@ def _verify_linux_bundle(bundle: Path, expected_version: str) -> None:
         bundle / "pcl-codex",
         bundle / "install.sh",
         bundle / "pcl_codex_bridge" / "VERSION",
+        bundle / "pcl_codex_bridge" / "opencodex_sidecar.py",
         bundle / "opencodex" / "UPSTREAM.json",
         bundle / "opencodex" / "package.json",
         bundle / "opencodex" / "src" / "cli" / "index.ts",
@@ -472,9 +473,20 @@ def _verify_linux_bundle(bundle: Path, expected_version: str) -> None:
         raise RuntimeError(f"Downloaded bundle version mismatch: expected {expected_version}, got {version}")
     manifest = json.loads((bundle / "opencodex" / "UPSTREAM.json").read_text(encoding="utf-8"))
     package = json.loads((bundle / "opencodex" / "package.json").read_text(encoding="utf-8"))
-    if manifest.get("commit") != OPENCODEX_COMMIT:
+    # The archive digest has already been verified. Compare its own declarative
+    # pin, not this running updater's old pin, and never import downloaded code.
+    source = (bundle / "pcl_codex_bridge" / "opencodex_sidecar.py").read_text(encoding="utf-8")
+    pins = {}
+    for statement in ast.parse(source).body:
+        if isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Constant):
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and target.id in {"OPENCODEX_COMMIT", "OPENCODEX_VERSION"}:
+                    pins[target.id] = statement.value.value
+    commit = pins.get("OPENCODEX_COMMIT")
+    version = pins.get("OPENCODEX_VERSION")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit) or manifest.get("commit") != commit:
         raise RuntimeError("Downloaded bundle has an unexpected OpenCodex commit")
-    if manifest.get("version") != OPENCODEX_VERSION or package.get("version") != OPENCODEX_VERSION:
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version) or manifest.get("version") != version or package.get("version") != version:
         raise RuntimeError("Downloaded bundle has an unexpected OpenCodex version")
     runtime = subprocess.run(
         [str(bundle / "opencodex" / "bin" / "bun"), "--version"],

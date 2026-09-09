@@ -2,6 +2,8 @@ import tempfile
 import unittest
 import hashlib
 import os
+import json
+import subprocess
 import urllib.error
 from pathlib import Path
 from unittest import mock
@@ -13,6 +15,7 @@ from pcl_codex_bridge.release_updater import (
     RELEASE_API,
     RELEASE_METADATA_URL,
     _latest_release_metadata,
+    _verify_linux_bundle,
     _expected_digest,
     _version_tuple,
     cache_release_asset,
@@ -24,6 +27,26 @@ from pcl_codex_bridge.release_updater import (
 
 
 class ReleaseUpdaterTests(unittest.TestCase):
+    def test_linux_upgrade_uses_new_bundles_pin_not_running_updaters_pin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            files = {
+                "pcl-codex": "", "install.sh": "", "pcl_codex_bridge/VERSION": "9.0.0",
+                "pcl_codex_bridge/opencodex_sidecar.py": 'OPENCODEX_COMMIT = "' + "a" * 40 + '"\nOPENCODEX_VERSION = "9.1.0"\nraise RuntimeError("must never execute")',
+                "opencodex/UPSTREAM.json": json.dumps({"commit": "a" * 40, "version": "9.1.0"}),
+                "opencodex/package.json": json.dumps({"version": "9.1.0"}),
+                "opencodex/src/cli/index.ts": "", "opencodex/bin/bun": "",
+            }
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            with mock.patch("pcl_codex_bridge.release_updater.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "1.3.14\n", "")):
+                _verify_linux_bundle(root, "9.0.0")
+                (root / "opencodex/package.json").write_text('{"version":"9.2.0"}')
+                with self.assertRaisesRegex(RuntimeError, "unexpected OpenCodex version"):
+                    _verify_linux_bundle(root, "9.0.0")
+
     def test_rate_limit_falls_back_to_public_release_metadata_without_credentials(self):
         release = {"tag_name": "v2.5.14", "assets": [{
             "name": MAC_ASSET_NAME,

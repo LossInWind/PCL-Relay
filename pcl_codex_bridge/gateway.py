@@ -41,6 +41,7 @@ from .responses_protocol import (
     upstream_request,
 )
 from .responses_stream import ResponsesStreamBridge, SseWriter, ToolArgumentsError
+from .gateway_policy import management_networks, LOOPBACK_CIDRS
 
 
 PORT = int(os.environ.get("PCL_CODEX_GATEWAY_PORT", "15722"))
@@ -52,12 +53,8 @@ LOG_PATH = Path(
     )
 ).expanduser()
 STARTED_AT = time.time()
-ADMIN_NETWORKS = tuple(
-    ipaddress.ip_network(value.strip(), strict=False)
-    for value in os.environ.get(
-        "PCL_RELAY_ADMIN_CIDRS", "127.0.0.0/8,::1/128"
-    ).split(",")
-    if value.strip()
+ADMIN_NETWORKS = management_networks(
+    HOST, os.environ.get("PCL_RELAY_ADMIN_CIDRS", LOOPBACK_CIDRS)
 )
 PORTAL_URL = "https://llmapi.pcl.ac.cn"
 PORTAL_DOMAIN = "pcl.ac.cn"

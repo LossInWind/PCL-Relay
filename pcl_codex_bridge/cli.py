@@ -28,6 +28,7 @@ from .client_config import (
     write_native_catalog,
 )
 from .http_client import request_json
+from .gateway_policy import management_networks
 from .model_detection import detect_models, discover_models
 from .models import (
     AGENTS,
@@ -186,11 +187,7 @@ def install_gateway(args: argparse.Namespace) -> Dict[str, Any]:
     if not re.fullmatch(r"[A-Za-z0-9.:-]+", args.host):
         raise RuntimeError("Gateway listen host must be an explicit IP address or hostname")
     try:
-        admin_networks = [
-            str(ipaddress.ip_network(value.strip(), strict=False))
-            for value in args.admin_cidrs.split(",")
-            if value.strip()
-        ]
+        admin_networks = [str(network) for network in management_networks(args.host, args.admin_cidrs)]
     except ValueError as exc:
         raise RuntimeError(f"Invalid gateway admin CIDR: {exc}") from exc
     if not admin_networks:

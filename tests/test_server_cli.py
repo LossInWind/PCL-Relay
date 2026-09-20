@@ -5,6 +5,16 @@ from pcl_codex_bridge import cli
 
 
 class ServerCliTests(unittest.TestCase):
+    def test_remote_gateway_missing_acl_rejected_before_install(self):
+        args = mock.MagicMock(host="100.113.234.58", admin_cidrs="127.0.0.0/8,::1/128")
+        with (
+            mock.patch("pcl_codex_bridge.cli.sys.platform", "linux"),
+            mock.patch("pcl_codex_bridge.cli.install_source_tree") as install,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "explicit remote management CIDRs"):
+                cli.install_gateway(args)
+            install.assert_not_called()
+
     def test_gateway_install_rejects_shell_syntax_in_listen_host(self):
         args = mock.MagicMock(host="127.0.0.1 $(touch bad)", admin_cidrs="127.0.0.0/8")
         with mock.patch("pcl_codex_bridge.cli.sys.platform", "linux"):

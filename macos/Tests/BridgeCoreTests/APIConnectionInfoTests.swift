@@ -2,6 +2,14 @@ import XCTest
 @testable import BridgeCore
 
 final class APIConnectionInfoTests: XCTestCase {
+    func testGuideMatchesFormAndDoesNotPromiseClientSupport() {
+        let info = APIConnectionInfo(gateway: "http://100.1.2.3:15722/v1", modelID: "Kimi-K3")!
+        let guide = info.setupGuide(modelIDs: ["Kimi-K3", "GLM-5.2"])
+        for text in [info.baseURL, "请求头：留空", "模型 ID：Kimi-K3", "显示名称：GLM-5.2", "2.0.15", "不代表所有版本支持", "消耗少量额度"] {
+            XCTAssertTrue(guide.contains(text), text)
+        }
+        XCTAssertFalse(guide.contains("pcl/Kimi-K3"))
+    }
     func testExportUsesRawModelAndDoesNotClaimSecret() {
         let info = APIConnectionInfo(gateway: "http://100.1.2.3:15722/v1/", modelID: "Kimi-K3")!
         XCTAssertEqual(info.baseURL, "http://100.1.2.3:15722/v1")

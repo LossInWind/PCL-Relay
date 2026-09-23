@@ -24,10 +24,12 @@ Release: https://github.com/LossInWind/PCL-Relay/releases/tag/v2.5.15
 
 ## Deployment evidence and remaining gates
 
-- Local Mac: GUI/client 2.5.15 installed; 2.63.0 staged. Old model runtime has
-  active requests, so activation is deferred. Hourly refresh is configured but
-  must not be called operational until 2.63.0 is running. Current windows may
-  still need to reopen after work finishes because the catalog is startup-only.
+- Local Mac: GUI/client 2.5.15 installed; after explicit user approval, runtime
+  2.63.0 activated with pinned Bun 1.3.14 (verified live PID 2003). Codex config
+  and auth hashes were unchanged across activation. Both GPT-6 Sol and PCL
+  DeepSeek Flash returned HTTP 200 with response.completed against the actual
+  port 15725 service. Hourly upstream catalog refresh is enabled. Current windows
+  may still need to reopen after work finishes because the catalog is startup-only.
 - Kai Mac: 2.5.15 downloaded from GitHub, verified and installed; model runtime
   2.63.0 verified live; new catalog refreshed; a PCL streaming request completed.
   A pre-existing loopback native-router on 15726 overlaps the control listener;

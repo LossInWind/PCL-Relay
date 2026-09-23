@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
         set { agentSelection.adopt(newValue, revision: agentSelection.revision) }
     }
     @Published var agentSaveMessage = "尚未修改"
+    @Published var catalogSyncMessage = "官方目录尚未检查"
+    var isSyncingCatalog = false
     @Published var isInstallingIntegration = false
     @Published var showDetectionConfirmation = false
     @Published var checks: [String: CheckEvidence] = [:]
@@ -179,6 +181,9 @@ final class AppModel: ObservableObject {
         launchAtLoginEnabled = loginItem.enabled
         launchAtLoginStatusText = loginItem.message
         refreshAll()
+        // Periodic synchronization belongs to upstream OpenCodex, not a second
+        // App timer. Starting the UI only reads previous evidence.
+        Task { await readOfficialCatalogStatus() }
     }
 
     func enableLoginItem() {

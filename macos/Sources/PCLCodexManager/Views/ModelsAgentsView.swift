@@ -37,6 +37,7 @@ struct ModelsAgentsView: View {
                 }
                 Text("目录读取不发送生成请求。能力结果为历史实测，不代表此刻所有模型均可调用。")
                     .font(.caption).foregroundStyle(.secondary)
+                Text(model.catalogSyncMessage).font(.caption).foregroundStyle(.secondary)
                 if let check = model.checks["models"] {
                     Text(check.summary).font(.caption).foregroundStyle(check.phase == .failed ? Color.orange : Color.secondary)
                 }

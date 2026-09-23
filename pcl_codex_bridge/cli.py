@@ -552,6 +552,14 @@ def parser() -> argparse.ArgumentParser:
     )
     gateway.set_defaults(handler=install_gateway)
 
+    from .catalog_refresh import catalog_status, refresh_catalog
+    catalog = commands.add_parser("catalog")
+    catalog_actions = catalog.add_subparsers(dest="catalog_action", required=True)
+    catalog_actions.add_parser("status").set_defaults(handler=lambda a: catalog_status())
+    catalog_refresh = catalog_actions.add_parser("refresh")
+    catalog_refresh.add_argument("--if-due", action="store_true")
+    catalog_refresh.set_defaults(handler=lambda a: refresh_catalog(if_due=a.if_due))
+
     models = commands.add_parser("models")
     actions = models.add_subparsers(dest="models_action", required=True)
     detect = actions.add_parser("detect")

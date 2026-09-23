@@ -31,7 +31,7 @@ Codex Desktop / VS Code Codex
 ChatGPT Codex 后端       PCL gateway endpoint -> PCL API
 ```
 
-- 本机路由、官方 ChatGPT Codex 透传、模型目录、Responses SSE、取消、重试、工具调用转换、Codex 注入、journal 和 restore 全部直接运行固定上游 OpenCodex 2.48.0 的完整源码。
+- 本机路由、官方 ChatGPT Codex 透传、模型目录、Responses SSE、取消、重试、工具调用转换、Codex 注入、journal 和 restore 全部直接运行固定上游 OpenCodex 2.63.0 的完整源码。
 - App 固定使用 OpenCodex 文档列出的 Bun 1.3.14 HTTP/SSE 上游回退路径，避免 macOS HTTP 代理可用但 WSS 被出口重置时触发双层重试；Codex→sidecar 的 Responses WebSocket 仍由 OpenCodex 原生实现承接。
 - 官方 GPT 保留现有 ChatGPT 登录、模型名称和 Codex 行为；PCL Relay 不解析、重写或自行重试官方请求。
 - PCL gateway 通过 OpenCodex 成熟的 `openai-chat` adapter 接入，`pcl/<模型>` 才会发往已配置 gateway endpoint，官方请求不会进入 PCL gateway。
@@ -172,4 +172,13 @@ swift test
 ./scripts/package_release.sh
 ```
 
-本安装包直接内嵌 MIT 许可的完整固定版 [`OpenCodex`](https://github.com/lidge-jun/opencodex) 2.48.0（commit `9a27e86992d7a014e0aa92c046199b9fac148201`），而不是选择性重写其传输层。其他历史参考与完整许可见 `NOTICE`。
+本安装包直接内嵌 MIT 许可的完整固定版 [`OpenCodex`](https://github.com/lidge-jun/opencodex) 2.63.0（commit `96b1406cb63e429cec8d2e3914af4ba99f2e37b9`），而不是选择性重写其传输层。其他历史参考与完整许可见 `NOTICE`。
+
+### 官方模型目录维护
+
+新安装默认启用上游 `catalogAutoRefresh`（每 60 分钟），不依赖 Relay 窗口保持打开。
+“刷新模型目录”同时执行官方 Codex 目录同步和 PCL 目录发现，两者独立报告失败。
+`pcl-codex catalog refresh` 只调用上游目录/缓存更新，不重新注入登录配置、不改历史、不重启会话。
+`pcl-codex catalog status` 是只读检查。并发手动刷新串行化，失败保留旧目录。
+官方模型的能力元数据由上游维护；需要新适配的模型仍需更新完整上游版本，不能仅添加名称。
+Codex 的 `model_catalog_json` 在启动时读取：磁盘更新不代表旧窗口已重载，请在任务结束后重新打开客户端。

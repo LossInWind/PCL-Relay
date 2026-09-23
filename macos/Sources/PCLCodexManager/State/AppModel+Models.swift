@@ -2,12 +2,56 @@ import BridgeCore
 import Foundation
 
 extension AppModel {
+    func readOfficialCatalogStatus() async {
+        do {
+            let result = try await runCLI(["catalog", "status"])
+            guard result.exitCode == 0,
+                  let data = result.stdout.data(using: .utf8),
+                  let state = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            let enabled = state["auto_refresh_enabled"] as? Bool == true
+            catalogSyncMessage = enabled
+                ? "官方目录由 OpenCodex 每小时自动同步；已有窗口可能需在任务结束后重新打开。"
+                : "官方目录自动同步未启用；可通过刷新模型目录手动更新。"
+            if state["status"] as? String == "failed" {
+                catalogSyncMessage += " 上次手动同步失败，旧目录已保留。"
+            }
+        } catch { catalogSyncMessage = "无法读取官方目录同步状态：\(error.localizedDescription)" }
+    }
+
+    func syncOfficialCatalog(ifDue: Bool) async {
+        guard !isSyncingCatalog else { return }
+        isSyncingCatalog = true
+        defer { isSyncingCatalog = false }
+        do {
+            let result = try await runCLI(["catalog", "refresh"] + (ifDue ? ["--if-due"] : []))
+            guard result.exitCode == 0,
+                  let data = result.stdout.data(using: .utf8),
+                  let state = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { throw commandError(result) }
+            let status = state["status"] as? String ?? "failed"
+            if status == "success" {
+                let time = (state["last_success"] as? Double).map {
+                    Date(timeIntervalSince1970: $0).formatted(date: .abbreviated, time: .shortened)
+                } ?? "未知"
+                catalogSyncMessage = "官方目录已同步 · \(time)；已有窗口如未更新，请在任务结束后重新打开。"
+            } else if status == "disabled" {
+                catalogSyncMessage = "PCL 接入已关闭，未改动官方目录。"
+            } else if status != "busy" {
+                catalogSyncMessage = "官方目录同步失败，保留上次目录：\(state["error"] as? String ?? "上游未完成更新")"
+            }
+        } catch {
+            catalogSyncMessage = "官方目录同步失败，保留上次目录：\(error.localizedDescription)"
+        }
+    }
+
     func discoverModels() {
         guard !isDiscovering, !isSavingAgents, !isDetecting else { return }
         isDiscovering = true
         commandLog = "正在从中转站读取最新模型目录……"
         Task {
             defer { isDiscovering = false }
+            await syncOfficialCatalog(ifDue: false)
             let generation = checks["models", default: CheckEvidence()].begin()
             do {
                 let result = try await runCLI(["models", "discover"])

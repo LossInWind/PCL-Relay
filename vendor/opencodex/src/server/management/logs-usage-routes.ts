@@ -22,6 +22,7 @@ import {
   upsertOAuthProvider,
 } from "../../oauth";
 import { removeCredential } from "../../oauth/store";
+import { getFailureProjection } from "../../usage/failure-projection-cache";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets } from "../../providers/derive";
@@ -115,7 +116,10 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     }
     const all = getRequestLogEntries();
     const total = filteredRequestLogCount(all, url.searchParams);
-    const logs = filterRequestLogs(all, url.searchParams).map(requestLogDto);
+    // Not point-free: requestLogDto takes an options object second, and Array.map would pass the
+    // element INDEX into it. An explicit arrow keeps the default (decode rate included) and is
+    // what /api/logs wants; /api/request-history opts out at its own call sites.
+    const logs = filterRequestLogs(all, url.searchParams).map(entry => requestLogDto(entry));
     const poll = selectRequestLogPoll(logs, url.searchParams, cursor);
     return jsonResponse({
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -176,6 +180,24 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
   }
 
   if (url.pathname === "/api/usage" && req.method === "GET") {
+    // A sub-resource on the same route rather than a route of its own. It answers a different
+    // question -- which failures keep recurring, rather than what was spent -- and it costs a
+    // ledger scan, so it is opt-in: a dashboard asking for the usage summary must not pay for
+    // a projection it did not ask for.
+    if (url.searchParams.get("failures") === "1") {
+      const projection = await getFailureProjection();
+      return jsonResponse({
+        fingerprintVersion: projection.fingerprintVersion,
+        historyIncomplete: projection.historyIncomplete,
+        unattributedFailures: projection.unattributedFailures,
+        invalidTimestampFailures: projection.invalidTimestampFailures,
+        // Every field here is a closed roster member, a count or a timestamp. The scanner's
+        // checkpoint identity, the configured provider name, the model and the account label
+        // stay internal -- a grouping that promises to carry no content has to keep that
+        // promise at its boundary too.
+        failures: projection.groups,
+      });
+    }
     const range = parseRange(url.searchParams.get("range"));
     const surface = parseUsageSurface(url.searchParams.get("surface"));
     let window: UsageTimeWindow | undefined;
@@ -222,6 +244,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         const accumulator = filteredAggregate.accumulator;
         return jsonResponse({
           ...accumulator.summarize(range, now, surface),
+          ...(filteredAggregate.usageIncomplete ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const } : {}),
           historyTruncated: false,
           truncatedPrefixBytes: 0,
           entriesTruncated: false,
@@ -244,6 +267,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       const revisionKey = `${usageLogRevisionKey(aggregate.revision)}\0${effectiveReadLimit}`;
       const lastSeenSize = aggregate.revision?.size ?? 0;
       const baseReadMetadata = {
+        ...(aggregate.usageIncomplete ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const } : {}),
         historyTruncated: false,
         truncatedPrefixBytes: 0,
         entriesTruncated: false,
@@ -425,6 +449,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         bytes: result.bytes,
         ...(result.trashDir ? { trashDir: result.trashDir } : {}),
         removedPaths: result.removedPaths,
+        ...(result.skippedReferencedPaths?.length ? { skippedReferencedPaths: result.skippedReferencedPaths } : {}),
       });
     } catch {
       return jsonResponse({

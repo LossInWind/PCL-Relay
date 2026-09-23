@@ -2,6 +2,8 @@ import { waitForNativeMainStartupGate } from "../../src/codex/native-profile-sta
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { logsFromApiBody } from "../helpers/logs-api";
+import { timeoutGatedErrorBody } from "../helpers/timeout-gated-error-body";
+import { abortableSseUpstream } from "../helpers/abortable-sse-upstream";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -36,6 +38,8 @@ import {
   startServer,
 } from "../../src/server";
 import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
+import { setRelayPlatformForTests } from "../../src/server/responses/passthrough-delivery";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { readUsageEntries } from "../../src/usage/log";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
@@ -52,6 +56,7 @@ import { getDebugLogEntries, resetDebugLogBufferForTests } from "../../src/lib/d
 import { resetDebugSettingsForTests, setDebugSettings } from "../../src/lib/debug-settings";
 import { watchdogMs } from "../helpers/ci-watchdog";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { deferredResetSseUpstream } from "../helpers/deferred-reset-sse-upstream";
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 const originalGlobalFetch = globalThis.fetch;
@@ -752,6 +757,7 @@ describe("server local API auth", () => {
     };
     let acceptedCount = 0;
 
+    const releaseSpendHome = acquireOwnedSpendHome();
     try {
       const response = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST",
@@ -766,8 +772,10 @@ describe("server local API auth", () => {
       expect(response.status).toBe(429);
       expect(acceptedCount).toBe(1);
       expect(upstreamModels).toEqual(["first-model", "second-model"]);
+      await response.text();
     } finally {
       await upstream.stop(true);
+      releaseSpendHome();
     }
   });
 
@@ -2754,7 +2762,10 @@ describe("server local API auth", () => {
     );
     try {
       const response = await harness.request({ model });
-      expect(response.status).toBe(401);
+      // No roster carries this model, so the failure is an unsupported selection rather than a
+      // credential problem: 400 invalid_request_error, not the 401 invalid_api_key this used to
+      // report. What the case actually pins is the empty dispatch list below.
+      expect(response.status).toBe(400);
       expect(await response.text()).toContain("No eligible Codex account supports this model");
       expect(harness.dispatches).toEqual([]);
     } finally {
@@ -2854,8 +2865,8 @@ describe("server local API auth", () => {
     }
   });
 
-  test("inline vision sidecar checks exact-account cooldown using the helper model", async () => {
-    const sidecarModel = "gpt-5.3-codex-spark";
+  test("shared quota cooldown blocks exact-account requests before inline vision dispatch", async () => {
+    const sidecarModel = "gpt-5.6-sol";
     const upstreamModels: string[] = [];
     const harness = await startPoolRetryHarness(async (_accountId, request) => {
       const body = await request.json() as { model?: string };
@@ -2899,9 +2910,9 @@ describe("server local API auth", () => {
         }),
       });
 
-      expect(response.status).toBe(200);
-      expect(harness.dispatches).toEqual(["acct-pool-a"]);
-      expect(upstreamModels).toEqual([POOL_RETRY_MODEL]);
+      expect(response.status).toBe(429);
+      expect(harness.dispatches).toEqual([]);
+      expect(upstreamModels).toEqual([]);
       expect(loadConfig().activeCodexAccountId).toBe("pool-b");
     } finally {
       await stopPoolRetryHarness(harness);
@@ -3475,8 +3486,11 @@ describe("server local API auth", () => {
   });
 
   test("Activation E: both stream modes retry only before response relay construction", async () => {
-    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    // The relay decision only, not the whole process. A global platform override also changes
+    // state-directory identity, which is lowercased on win32 and so names a different directory
+    // on a case-sensitive filesystem: the server's own writer lease stopped matching and the
+    // retry was refused before it could reach the second account.
+    setRelayPlatformForTests("win32");
     try {
       for (const streamMode of ["legacy-tee", "eager-relay"] as const) {
         const positive = await startPoolRetryHarness(accountId => accountId === "acct-pool-a"
@@ -3508,7 +3522,7 @@ describe("server local API auth", () => {
         }
       }
     } finally {
-      if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+      setRelayPlatformForTests(undefined);
     }
   }, { timeout: SERVER_BUDGET_MS });
 
@@ -3543,29 +3557,23 @@ describe("server local API auth", () => {
     }
   });
 
-  // Stall past BOUNDED_BODY_TIMEOUT_MS (5s). The old 7s test budget left ~1.9s of
-  // headroom and timed out on windows-latest under runner contention.
+  // Release the suffix only after real inspection timed out, independent of header latency.
   test("stalled 400 body timeout never authorizes a pool retry", async () => {
     const prefix = unsupportedModelBody().slice(0, -1);
-    const suffix = "}";
-    const body = prefix + suffix;
-    const harness = await startPoolRetryHarness(() => rejectionResponse(new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(prefix));
-        setTimeout(() => {
-          controller.enqueue(new TextEncoder().encode(suffix));
-          controller.close();
-        }, 5_100);
-      },
-    })));
+    const body = prefix + "}";
+    const stalled = timeoutGatedErrorBody(prefix, "}");
+    let harness: PoolRetryHarness | undefined;
     try {
+      harness = await startPoolRetryHarness(() => rejectionResponse(stalled.stream()));
       const response = await harness.request();
       expect(response.status).toBe(400);
       expect(response.headers.get("x-pool-retry-test")).toBe("original");
       expect(await response.text()).toBe(body);
+      expect(stalled.observedTimeouts()).toBeGreaterThan(0);
       expect(harness.dispatches).toEqual(["acct-pool-a"]);
     } finally {
-      await stopPoolRetryHarness(harness);
+      stalled.restore();
+      if (harness) await stopPoolRetryHarness(harness);
     }
   }, { timeout: SERVER_BUDGET_MS });
 
@@ -4136,27 +4144,11 @@ describe("server local API auth", () => {
     let releaseAbort!: () => void;
     const upstreamAborted = new Promise<void>(resolve => { releaseAbort = resolve; });
     const originalFetch = globalThis.fetch;
-    const enc = new TextEncoder();
     globalThis.fetch = (async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url === "https://upstream.example/backend-api/codex/v1/responses") {
-        init?.signal?.addEventListener("abort", releaseAbort, { once: true });
-        let sent = false;
-        return new Response(
-          new ReadableStream<Uint8Array>({
-            pull(controller) {
-              if (!sent) {
-                sent = true;
-                controller.enqueue(enc.encode('event: response.created\ndata: {"type":"response.created"}\n\n'));
-                return;
-              }
-              return new Promise<void>(() => {});
-            },
-            cancel() {
-              releaseAbort();
-            },
-          }),
-          { headers: { "content-type": "text/event-stream" } },
+        return abortableSseUpstream(
+          'event: response.created\ndata: {"type":"response.created"}\n\n', init?.signal, releaseAbort,
         );
       }
       return originalFetch(input, init);
@@ -4184,6 +4176,7 @@ describe("server local API auth", () => {
         signal: clientAbort.signal,
       });
       expect(response.status).toBe(200);
+      const requestId = response.headers.get("x-opencodex-request-id");
       const reader = response.body!.getReader();
       const first = await reader.read();
       expect(first.done).toBe(false);
@@ -4194,6 +4187,10 @@ describe("server local API auth", () => {
         upstreamAborted,
         new Promise((_, reject) => setTimeout(() => reject(new Error("upstream was not aborted")), 500)),
       ]);
+      // A real fetch body settles on abort; await accounting before deleting its home.
+      const deadline = Date.now() + INTERNAL_DEADLINE_MS;
+      while (!getRequestLogEntries().some(entry => entry.requestId === requestId) && Date.now() < deadline) await Bun.sleep(5);
+      expect(getRequestLogEntries().find(entry => entry.requestId === requestId)).toMatchObject({ status: 499, closeReason: "client_cancel" });
     } finally {
       globalThis.fetch = originalFetch;
       await server.stop(true);
@@ -4242,23 +4239,14 @@ describe("server local API auth", () => {
   }, { timeout: SERVER_BUDGET_MS });
 
   test("native passthrough upstream reset still logs 502 and penalizes the pool", async () => {
-    const enc = new TextEncoder();
-    const source = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
-    const harness = await startPoolRetryHarness(() => new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          source.resolve(controller);
-          controller.enqueue(enc.encode('data: {"type":"response.output_text.delta","delta":"hello"}\n\n'));
-        },
-      }),
-      { headers: { "content-type": "text/event-stream" } },
-    ), { secondAccount: false, streamMode: "legacy-tee" });
+    const upstream = deferredResetSseUpstream('data: {"type":"response.output_text.delta","delta":"hello"}\n\n');
+    const harness = await startPoolRetryHarness(() => upstream.response(), { secondAccount: false, streamMode: "legacy-tee" });
     try {
       const response = await harness.request({ stream: true });
       const requestId = response.headers.get("x-opencodex-request-id");
       const reader = response.body!.getReader();
       expect((await reader.read()).done).toBe(false);
-      (await source.promise).error(new Error("fixture upstream connection reset"));
+      upstream.reset();
       while (!(await reader.read()).done) { /* drain the synthetic failed terminal */ }
       const deadline = Date.now() + INTERNAL_DEADLINE_MS;
       while (!getRequestLogEntries().some(entry => entry.requestId === requestId) && Date.now() < deadline) {

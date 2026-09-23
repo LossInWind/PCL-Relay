@@ -5,6 +5,11 @@ description: Configure your first provider and route OpenAI Codex through openco
 
 This guide takes you from a fresh install to running Codex against a non-OpenAI model.
 
+## Standalone binary (no npm)
+
+You can also use a release archive containing the `ocx` binary and Bun runtime without npm.
+Extract it with its `gui/dist` directory beside the binary, then run `./ocx start`.
+
 ## 1. Run the setup wizard
 
 ```bash
@@ -13,7 +18,7 @@ ocx init
 
 `ocx init` walks you through:
 
-1. **Pick a provider** — choose one of the 79 built-in registry presets or `custom` to type a base
+1. **Pick a provider** — choose one of the 96 built-in registry presets or `custom` to type a base
    URL and adapter.
 2. **API key** — paste a key, or reference an environment variable like `${ANTHROPIC_API_KEY}`.
 3. **Default model** — for key, local, and custom providers, accept the preset or enter a model id.
@@ -86,8 +91,10 @@ On start, opencodex:
   Codex's model catalog**,
 - listens on `http://localhost:<port>/v1`.
 
-If the requested port is busy, `ocx start` selects a free port, records it in `runtime-port.json`,
-and updates Codex to use the live listener.
+If the requested port is busy, `ocx start` stops and tells you what holds it: run `ocx stop` first
+when the holder is an opencodex, or start on a free port with `ocx start --port <port>`. It does not
+move to another port by itself — that is what used to leave two proxies running with Codex pointed
+at the newer one.
 
 Check it:
 
@@ -114,7 +121,7 @@ codex -m "ollama-cloud/glm-5.2"      "Write a SQL migration"
 ## Choose sub-agent models (optional)
 
 A fresh config features five native models in Codex's sub-agent picker: `gpt-5.5`,
-`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.4-mini`. Open `ocx gui` to replace or
+`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-6-astra`. Open `ocx gui` to replace or
 reorder up to five native or routed models. The dashboard can also set one preferred sub-agent model
 and reasoning effort. See [Sub-agent Surface](/guides/sub-agent-surface/) to choose v1/base/v2 and
 understand when guidance, native defaults, and fallback apply.

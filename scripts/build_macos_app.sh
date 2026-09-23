@@ -9,8 +9,8 @@ VERSION="$(tr -d '[:space:]' < "$ROOT/pcl_codex_bridge/VERSION")"
 OPENCODEX_SOURCE="$ROOT/vendor/opencodex"
 OPENCODEX_MANIFEST="$ROOT/vendor/opencodex.UPSTREAM.json"
 OPENCODEX_RUNTIME="$ROOT/.build/opencodex-runtime"
-OPENCODEX_COMMIT="9a27e86992d7a014e0aa92c046199b9fac148201"
-OPENCODEX_TREE="a5148ad2f35df6d8ff1e1802e8aac6902f0a5e36"
+OPENCODEX_COMMIT="96b1406cb63e429cec8d2e3914af4ba99f2e37b9"
+OPENCODEX_TREE="22639518db6eab88525f7f0932cc4a81a7573b6d"
 
 if [[ ! "$VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
   echo "Invalid canonical version: $VERSION" >&2

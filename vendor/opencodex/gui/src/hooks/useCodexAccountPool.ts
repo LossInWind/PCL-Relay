@@ -54,6 +54,8 @@ export interface CodexAccountEntry {
   };
   mainAccountHardLock?: MainAccountHardLockStatus;
   needsReauth?: boolean;
+  selectionExcludedReason?: "plan_excluded";
+  selectionExcludedPlan?: string;
   health?: { status: "healthy" | "cooldown" | "reauth_required" | "warning"; reason?: string; until?: string };
   healthLabel?: string;
   healthSummary?: string;
@@ -95,6 +97,11 @@ export interface CodexAccountPoolController {
    * `ready` during a refresh so rows survive; this is what makes that wait visible.
    */
   refreshing: boolean;
+  /**
+   * The most recent account read failed. The rows it could not replace are still on screen, so
+   * this is the only thing that tells a surface they are no longer known to be current.
+   */
+  refreshFailed: boolean;
   /** True until the first load attempt settles, whether it succeeds or fails. */
   initialLoading: boolean;
   switchingId: string | null;
@@ -109,7 +116,7 @@ export interface CodexAccountPoolController {
    */
   activePinnedId: string | null;
 
-  load(refreshQuota?: boolean): Promise<boolean>;
+  load(refreshQuota?: boolean, options?: { validatePending?: boolean }): Promise<boolean>;
   switchAccount(id: string | null): Promise<CodexAccountActionResult<{ activeId: string | null }>>;
   setAccountPaused(id: string, paused: boolean): Promise<CodexAccountActionResult>;
   /** `null` resets the account to the default order. Accepts the `__main__` sentinel. */
@@ -158,6 +165,13 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
   );
   const [activeId, setActiveId] = useState<string | null>(() => seed?.activeId ?? null);
   const [loadState, setLoadState] = useState<CodexAccountLoadState>(() => (seed != null ? "ready" : "loading"));
+  // Deliberately beside `loadState` rather than inside it. `loadState` answers what the surface
+  // can draw, and a warm refresh failure keeps the rows drawable — folding the failure in would
+  // mean either flashing the cold skeleton over good data or, as before, saying nothing at all.
+  // Saying nothing is the defect: the rows on screen are the ones from before the refresh, so an
+  // account the user has just added is simply absent while the older ones look current (#5261).
+  // `refreshing` already set the precedent that a fact about the read lives next to loadState.
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [pauseUpdatingId, setPauseUpdatingId] = useState<string | null>(null);
   const [priorityUpdatingId, setPriorityUpdatingId] = useState<string | null>(null);
@@ -182,7 +196,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
   const loadGenerationRef = useRef(0);
   // Set by switchAccount so a background load already in flight cannot roll the active
   // id back to a value the server had not yet committed when that request was issued.
-  const pendingActiveIdRef = useRef<{ id: string | null } | null>(null);
+  const pendingActiveIdRef = useRef<{ id: string | null; staleReadsRemaining: number } | null>(null);
   const observersRef = useRef<Set<CodexAccountLoadObserver> | null>(null);
   if (observersRef.current === null) observersRef.current = new Set();
   // Last /active payload an actual read returned. Surfaces that mount after a
@@ -217,10 +231,20 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
   /** Full last /active payload, or undefined when none has succeeded yet. */
   const readLastActive = useCallback(() => lastActiveRef.current?.value, []);
 
-  const load = useCallback(async (refreshQuota = false): Promise<boolean> => {
+  const load = useCallback(async (refreshQuota = false, options: { validatePending?: boolean } = {}): Promise<boolean> => {
     const generation = ++loadGenerationRef.current;
-    // Bounded per attempt: a hung accounts/active read must settle, not pin the poll.
-    const bounded = createBoundedFetch(20_000);
+    const validatePending = options.validatePending === true;
+    // Validation can include token recovery, WHAM and two 30s model attempts.
+    // Budget per known row (conservatively ignoring server parallelism), plus
+    // native-main lookup time. Ordinary reads retain their short polling deadline.
+    const knownAccounts = lastGoodByBase.get(apiBase)?.accounts.length ?? 0;
+    const bounded = createBoundedFetch(validatePending ? 30_000 + 120_000 * Math.max(1, knownAccounts) : 20_000);
+    // A periodic read must not supersede this longer-running explicit operation.
+    const validationLease = validatePending ? {} as PauseToken : null;
+    if (validationLease) {
+      pauseTokensRef.current!.add(validationLease);
+      setPauseCount(pauseTokensRef.current!.size);
+    }
     setInflightCount(count => count + 1);
     // The try opens immediately after the increment so even a synchronous throw in the
     // observer snapshot below cannot leave the counter stuck above zero.
@@ -237,7 +261,10 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
 
       const accountsTask = (async (): Promise<boolean> => {
         try {
-          const response = await fetch(`${apiBase}/api/codex-auth/accounts${refreshQuota ? "?refresh=1" : ""}`, { signal: bounded.signal });
+          const response = await fetch(`${apiBase}/api/codex-auth/accounts${validatePending ? "/refresh" : refreshQuota ? "?refresh=1" : ""}`, {
+            method: validatePending ? "POST" : "GET",
+            signal: bounded.signal,
+          });
           if (!response.ok) throw new Error("account load failed");
           const payload = await response.json();
           if (loadGenerationRef.current === generation) {
@@ -262,6 +289,10 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
             hasLoadedRef.current = true;
             // Progressive: paint account/quota boxes as soon as /accounts returns.
             setLoadState("ready");
+            // Cleared here rather than at the settle below, because the rows it qualifies are
+            // painted here. Waiting for /active to finish would leave the just-replaced rows
+            // labelled as pre-refresh ones for as long as that read's budget allows.
+            setRefreshFailed(false);
           }
           return true;
         } catch {
@@ -277,8 +308,10 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
           if (loadGenerationRef.current === generation) {
             const serverActiveId = active.activeCodexAccountId ?? null;
             const pending = pendingActiveIdRef.current;
-            if (pending && serverActiveId !== pending.id) {
-              // Stale read: keep the accepted value and let the next load reconcile.
+            if (pending && pending.staleReadsRemaining > 0 && serverActiveId !== pending.id) {
+              // Allow one eventually-consistent response to preserve the accepted value,
+              // but ensure a repeated mismatch can reconcile legitimate routing changes.
+              pending.staleReadsRemaining -= 1;
             } else {
               pendingActiveIdRef.current = null;
               nextActiveId = serverActiveId;
@@ -312,12 +345,18 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
         });
         return activeOk;
       }
-      // Cold failure only: after a successful load (including empty), keep rows and stay ready
-      // so a soft poll miss does not flash the skeleton / wipe the pool.
+      // A cold failure has nothing to show, so it replaces the surface. A warm one keeps its rows
+      // — flashing the skeleton on a soft poll miss is its own defect — and says so instead of
+      // continuing to present them as current.
       if (!hasLoadedRef.current) setLoadState("error");
+      setRefreshFailed(true);
       return false;
     } finally {
       bounded.clear();
+      if (validationLease) {
+        pauseTokensRef.current!.delete(validationLease);
+        setPauseCount(pauseTokensRef.current!.size);
+      }
       setInflightCount(count => Math.max(0, count - 1));
       setFirstAttemptSettled(true);
     }
@@ -354,7 +393,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
   useEffect(() => {
     if (!enabled || !needsQuotaFill || pauseCount > 0) return;
     const timers = [350, 900, 2000].map((delayMs) => (
-      window.setTimeout(() => { void load(false); }, delayMs)
+      window.setTimeout(() => { if (pauseTokensRef.current!.size === 0) void load(false); }, delayMs)
     ));
     return () => {
       for (const timer of timers) window.clearTimeout(timer);
@@ -365,7 +404,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
   // (no timer, no traffic) while the tab is hidden.
   useEffect(() => {
     if (!enabled || pauseCount > 0) return;
-    return startVisibilityPoll(() => { void load(); }, REFRESH_INTERVAL_MS);
+    return startVisibilityPoll(() => { if (pauseTokensRef.current!.size === 0) void load(); }, REFRESH_INTERVAL_MS);
   }, [enabled, load, pauseCount]);
 
   const pauseRefresh = useCallback((): PauseToken => {
@@ -396,7 +435,10 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
       if (!response.ok) throw new Error("account switch failed");
       const result = await response.json().catch(() => ({})) as { activeCodexAccountId?: string | null };
       const selectedId = result.activeCodexAccountId ?? id;
-      pendingActiveIdRef.current = { id: selectedId ?? null };
+      pendingActiveIdRef.current = {
+        id: selectedId ?? null,
+        staleReadsRemaining: 1,
+      };
       setActiveId(selectedId ?? null);
       // A manual selection pins its target until the account drains or routing moves off
       // it. The badge follows the id, not /active's `pinned` boolean, so a same-tier
@@ -449,7 +491,10 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
       )));
       if (Object.prototype.hasOwnProperty.call(result, "activeCodexAccountId")) {
         const nextActiveId = result.activeCodexAccountId ?? null;
-        pendingActiveIdRef.current = { id: nextActiveId };
+        pendingActiveIdRef.current = {
+          id: nextActiveId,
+          staleReadsRemaining: 1,
+        };
         setActiveId(nextActiveId);
       }
       // Deliberately NOT cross-gated against the switch and order writes, even though
@@ -532,7 +577,10 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
       )));
       if (Object.prototype.hasOwnProperty.call(result, "activeCodexAccountId")) {
         const nextActiveId = result.activeCodexAccountId ?? null;
-        pendingActiveIdRef.current = { id: nextActiveId };
+        pendingActiveIdRef.current = {
+          id: nextActiveId,
+          staleReadsRemaining: 1,
+        };
         setActiveId(nextActiveId);
       }
       // Conditional for the same reason as the single-account pause above: clearing
@@ -593,6 +641,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
     activeId,
     loadState,
     refreshing: inflightCount > 0,
+    refreshFailed,
     initialLoading: !firstAttemptSettled,
     switchingId,
     pauseUpdatingId,

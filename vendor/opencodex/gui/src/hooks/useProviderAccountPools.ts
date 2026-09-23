@@ -1,6 +1,9 @@
+import { parseQuotaFailureCode } from "../../../src/providers/quota-types";
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import type { AccountLoadState, AccountQuotaReading } from "../components/provider-workspace/types";
 import { createBoundedFetch } from "../bounded-fetch";
+import { confirmAction, requestTextValue } from "../action-dialogs";
+import { credentialAliasRejection, CREDENTIAL_ALIAS_MAX_LENGTH } from "../credential-alias";
 import { accountNeedsReauth } from "../oauth-health-display";
 import { oauthAccountDisplayLabel } from "../provider-workspace/auth";
 
@@ -36,7 +39,9 @@ function mergeRosterRows<T extends QuotaRow>(rows: T[], previous: T[]): T[] {
   return mergeQuotaRows(rows, previous, false).map(row => supportsQuotaRead(row) ? {
     ...row,
     quotaPending: prior.get(row.id)?.quotaPending ?? false,
-    quotaUnavailable: prior.get(row.id)?.quotaUnavailable ?? false,
+    quotaUnavailable: prior.get(row.id)?.quotaMode === row.quotaMode ? prior.get(row.id)?.quotaUnavailable ?? false : false,
+    quotaFailure: row.quotaMode === "probe" && prior.get(row.id)?.quotaMode === row.quotaMode && prior.get(row.id)?.quotaUnavailable
+      ? parseQuotaFailureCode(prior.get(row.id)?.quotaFailure) : undefined,
   } : row);
 }
 
@@ -47,7 +52,7 @@ function mergeLateQuotaRows<T extends QuotaRow>(rows: T[], enriched: T[]): T[] {
     const incoming = byId.get(row.id);
     if (!incoming || incoming.quotaMode !== row.quotaMode) return row;
     const quota = mergeQuotaRows([incoming], [row], true)[0];
-    return { ...row, quota: quota.quota, quotaPending: quota.quotaPending, quotaUnavailable: quota.quotaUnavailable };
+    return { ...row, quota: quota.quota, quotaPending: quota.quotaPending, quotaUnavailable: quota.quotaUnavailable, quotaFailure: quota.quotaFailure };
   });
 }
 
@@ -60,7 +65,7 @@ function mergeQuotaRows<T extends QuotaRow>(rows: T[], previous: T[], enriched: 
     const supported = supportsQuotaRead(row);
     // Legacy/unknown mode must not acquire synthetic flags that would override
     // a provider report or imply that a quota probe is supported.
-    if (!supported && row.quotaMode !== "unsupported") return { ...row, quotaMode: undefined, quotaPending: undefined };
+    if (!supported && row.quotaMode !== "unsupported") return { ...row, quotaMode: undefined, quotaPending: undefined, quotaFailure: undefined };
     // Only surviving credential IDs can retain omitted data. Explicit null is an
     // authoritative invalidation, including failed/expired credential readings.
     const retain = supported && (!enriched || row.quotaUnavailable === true);
@@ -69,6 +74,8 @@ function mergeQuotaRows<T extends QuotaRow>(rows: T[], previous: T[], enriched: 
       quota: row.quotaMode === "unsupported" ? null : row.quota !== undefined ? row.quota : retain ? prior.get(row.id)?.quota : undefined,
       quotaPending: !enriched && row.quotaMode === "probe",
       quotaUnavailable: enriched ? row.quotaUnavailable === true : false,
+      quotaFailure: enriched && row.quotaMode === "probe" && row.quotaUnavailable === true
+        ? parseQuotaFailureCode(row.quotaFailure) : undefined,
     };
   });
 }
@@ -76,7 +83,7 @@ function mergeQuotaRows<T extends QuotaRow>(rows: T[], previous: T[], enriched: 
 function unavailableQuotaRows<T extends QuotaRow>(rows: T[], attempted?: T[]): T[] {
   const attemptedModes = attempted && new Map(attempted.map(row => [row.id, row.quotaMode]));
   return rows.map(row => supportsQuotaRead(row) && (!attemptedModes || attemptedModes.get(row.id) === row.quotaMode)
-    ? { ...row, quotaUnavailable: true, quotaPending: false }
+    ? { ...row, quotaUnavailable: true, quotaPending: false, quotaFailure: undefined }
     : row);
 }
 
@@ -422,7 +429,12 @@ export function useProviderAccountPools(deps: {
   };
 
   const removeApiKey = async (provider: string, entry: ApiKeyEntry) => {
-    if (!window.confirm(t("prov.keyRemoveConfirm", { key: entry.label ?? entry.masked }))) return;
+    const consented = await confirmAction({
+      message: t("prov.keyRemoveConfirm", { key: entry.label ?? entry.masked }),
+      confirmLabel: t("common.remove"),
+      tone: "danger",
+    });
+    if (!consented) return;
     const res = await fetch(`${apiBase}/api/providers/keys?name=${encodeURIComponent(provider)}&id=${encodeURIComponent(entry.id)}`, { method: "DELETE" });
     if (res.ok) {
       notify(t("prov.keyRemoved", { key: entry.label ?? entry.masked }), true);
@@ -461,7 +473,12 @@ export function useProviderAccountPools(deps: {
   };
 
   const editCredentialAlias = async (provider: string, type: "oauth" | "api-key", id: string, current?: string) => {
-    const entered = window.prompt(t("prov.aliasPrompt"), current ?? "");
+    const entered = await requestTextValue({
+      message: t("prov.aliasPrompt"),
+      initialValue: current ?? "",
+      maxLength: CREDENTIAL_ALIAS_MAX_LENGTH,
+      validate: value => credentialAliasRejection(value, t),
+    });
     if (entered === null) return;
     const alias = entered.trim();
     const response = await fetch(type === "oauth" ? `${apiBase}/api/oauth/accounts/alias` : `${apiBase}/api/providers/keys/alias`, {
@@ -480,7 +497,12 @@ export function useProviderAccountPools(deps: {
 
   const removeAccount = async (provider: string, account: OAuthAccount) => {
     const label = oauthAccountDisplayLabel(accountSets[provider]?.accounts ?? [account], account, t);
-    if (!window.confirm(t("prov.accountRemoveConfirm", { email: label }))) return;
+    const consented = await confirmAction({
+      message: t("prov.accountRemoveConfirm", { email: label }),
+      confirmLabel: t("common.remove"),
+      tone: "danger",
+    });
+    if (!consented) return;
     try {
       const res = await fetch(`${apiBase}/api/oauth/accounts?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(account.id)}`, { method: "DELETE" });
       if (!res.ok) { notify(t("prov.accountRemoveFail", { email: label }), false); return; }

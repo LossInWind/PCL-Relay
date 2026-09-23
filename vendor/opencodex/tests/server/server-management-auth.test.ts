@@ -1,10 +1,18 @@
+import { request as httpRequest } from "node:http";
+import { getActiveTurnCount } from "../../src/server/lifecycle";
+// Holds INV-AUTH-01 from structure/overview.md; keep the id here if this file is split or renamed.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { SERVER_BUDGET_MS } from "../helpers/test-budget";
 import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, saveConfig } from "../../src/config";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { flushNativeMainStartupReleases } from "../../src/codex/native-profile-startup";
+import { clearContextSessionOwnersForTests } from "../../src/codex/context-owner";
+import { resetContextRelayActivationForTests } from "../../src/codex/context-compat";
 import { startServer } from "../../src/server";
+import { readCodexAccountRecord, saveCodexAccountCredential } from "../../src/codex/account-store";
 import type { OcxConfig } from "../../src/types";
 import { serveGuiFile, serveSessionBootstrap } from "../../src/server/gui-static";
 import { isProxyAdmissionSecret } from "../../src/server/auth-cors";
@@ -23,6 +31,7 @@ import {
   setPlatformForTests,
   timedOutSecretPathCountForTests,
   hardenSecretDir,
+  flushWindowsSecretAclReapsBeforeRemoval,
 } from "../../src/lib/windows-secret-acl";
 import {
   LOCAL_ATTESTATION_CHALLENGE_HEADER,
@@ -85,9 +94,15 @@ import { setSystemRestartIoForTests } from "../../src/server/management/system-r
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const previousHome = process.env.OPENCODEX_HOME;
+const previousCodexHome = process.env.CODEX_HOME;
 const previousDataToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousAdminToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
 let testHome = "";
+
+function enableContextRelay(): void {
+  writeFileSync(join(testHome, "config.toml"), "[features]\ncontext_management.experimental_mode = true\n");
+  resetContextRelayActivationForTests();
+}
 
 function remoteConfig(): OcxConfig {
   return {
@@ -171,11 +186,26 @@ function websocketHandshakeOpens(url: URL, token: string): Promise<boolean> {
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), "ocx-management-auth-"));
   process.env.OPENCODEX_HOME = testHome;
+  process.env.CODEX_HOME = testHome;
+  resetContextRelayActivationForTests();
   process.env.OPENCODEX_API_AUTH_TOKEN = "data-secret";
   process.env.OPENCODEX_ADMIN_AUTH_TOKEN = "admin-secret";
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Drain producers before the final handle-release barrier. Native-main
+  // release can finish ACL-backed startup work under CODEX_HOME and register
+  // another child reap; waiting for reaps before that release misses the child.
+  await flushNativeMainStartupReleases();
+  // Flush all homes before restoring environment variables, including startup
+  // rollback flights that no successfully returned server could have awaited.
+  await flushConfigDirHardeningForTests();
+  // The caller-facing ACL timeout may settle before icacls actually exits.
+  // Deletion waits for actual reaps, after every producer above has settled.
+  await flushWindowsSecretAclReapsBeforeRemoval(testHome);
+  resetContextRelayActivationForTests();
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = previousCodexHome;
   setSystemRestartIoForTests();
   setIcaclsRunnerForTests(null);
   setPlatformForTests(null);
@@ -619,6 +649,114 @@ describe("management and data-plane credential separation", () => {
     }
   });
 
+  test("Codex backend aliases retain data-plane authentication and cannot enter management", async () => {
+    enableContextRelay();
+    saveConfig(remoteConfig());
+    const server = startServer(0);
+    try {
+      for (const token of [undefined, "admin-secret", "data-secret"]) {
+        const headers: Record<string, string> = token ? { "x-opencodex-api-key": token } : {};
+        const models = await fetch(new URL("/backend-api/codex/models", server.url), { headers });
+        expect(models.status).toBe(token === "data-secret" ? 200 : 401);
+        const context = await fetch(new URL("/backend-api/codex/alpha/notes/v2/read_file", server.url), {
+          method: "POST", headers, body: "{}",
+        });
+        expect(context.status).toBe(token === "data-secret" ? 400 : 401);
+        const management = await fetch(new URL("/backend-api/codex/api/config", server.url), { headers });
+        expect(management.status).toBe(404);
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("canceling an incomplete context body releases the actual listener turn", async () => {
+    enableContextRelay();
+    saveConfig(remoteConfig());
+    const server = startServer(0);
+    const baseline = getActiveTurnCount();
+    const request = httpRequest(new URL("/v1/alpha/notes/v2/write_file", server.url), {
+      method: "POST", headers: { authorization: "Bearer data-secret", "content-length": "1000" },
+    });
+    request.on("error", () => {}); // Destroying this deliberately unfinished request resets the socket.
+    const waitForCount = async (expected: number) => {
+      const deadline = Date.now() + 5000;
+      while (getActiveTurnCount() !== expected && Date.now() < deadline) {
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      expect(getActiveTurnCount()).toBe(expected);
+    };
+    try {
+      request.write("{"); // Never end the body: the server is waiting inside the bounded parser.
+      await waitForCount(baseline + 1);
+      request.destroy();
+      await waitForCount(baseline);
+    } finally {
+      request.destroy();
+      await server.stop(true);
+    }
+  });
+
+  test("context relay remains absent without the native experimental opt-in", async () => {
+    saveConfig(remoteConfig());
+    const server = startServer(0);
+    try {
+      const response = await fetch(new URL("/v1/alpha/notes/v2/read_file", server.url), {
+        method: "POST", headers: { authorization: "Bearer data-secret" }, body: "{}",
+      });
+      expect(response.status).toBe(404);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("context bearer admission reaches body validation without accepting foreign credentials", async () => {
+    enableContextRelay();
+    saveConfig(remoteConfig());
+    const server = startServer(0);
+    try {
+      for (const prefix of ["/v1", "/backend-api/codex"]) {
+        for (const token of ["data-secret", "admin-secret", "foreign-secret"]) {
+          const response = await fetch(new URL(`${prefix}/alpha/notes/v2/read_file`, server.url), {
+            method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}",
+          });
+          expect(response.status).toBe(token === "data-secret" ? 400 : 401);
+          if (token === "data-secret") expect(await response.text()).toContain("context.session_id");
+        }
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("authenticated context without a successful model owner fails closed on both listener prefixes", async () => {
+    enableContextRelay();
+    const cfg = remoteConfig();
+    cfg.providers.openai = { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward", codexAccountMode: "pool" };
+    saveConfig(cfg); clearContextSessionOwnersForTests();
+    const originalFetch = globalThis.fetch;
+    let upstreamCalls = 0;
+    globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "0.0.0.0") return originalFetch(input, init);
+      upstreamCalls++; throw new Error("unknown context owner must not reach upstream");
+    }, { preconnect: originalFetch.preconnect });
+    const server = startServer(0);
+    try {
+      for (const prefix of ["/v1", "/backend-api/codex"]) {
+        const response = await fetch(new URL(`${prefix}/alpha/notes/v2/read_file`, server.url), {
+          method: "POST", headers: { authorization: "Bearer data-secret" },
+          body: JSON.stringify({ context: { session_id: "unknown-root" } }),
+        });
+        expect(response.status).toBe(409);
+        expect(await response.text()).toContain("context_account_unavailable");
+      }
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      await server.stop(true); globalThis.fetch = originalFetch; clearContextSessionOwnersForTests();
+    }
+  });
+
   test("data and management environment tokens authorize only their own planes", async () => {
     saveConfig(remoteConfig());
     const server = startServer(0);
@@ -955,6 +1093,67 @@ describe("management and data-plane credential separation", () => {
       expect(html).toContain('name="opencodex-session-server-origin"');
     } finally {
       await server.stop(true);
+    }
+  });
+
+  test("deferred Codex validation requires a same-origin mutation session with CSRF", async () => {
+    const config = remoteConfig();
+    config.hostname = "127.0.0.1";
+    const accountId = "consent-wire";
+    config.codexAccounts = [{ id: accountId, isMain: false, plan: "pro" }];
+    saveConfig(config);
+    saveCodexAccountCredential(accountId, { accessToken: "consent-access", refreshToken: "consent-refresh",
+      expiresAt: Date.now() + 3600_000, chatgptAccountId: "consent-account" }, { validationPending: true });
+    const originalFetch = globalThis.fetch;
+    let warmups = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = input instanceof Request ? input.url : String(input);
+      if (target.endsWith("/wham/usage")) return Response.json({ plan_type: "pro",
+        rate_limit: { secondary_window: { used_percent: 12, limit_window_seconds: 604800 } } });
+      if (target.endsWith("/codex/responses")) {
+        warmups++;
+        return new Response('data: {"type":"response.completed"}\n\n');
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    const server = startServer(0);
+    try {
+      const bootstrap = await fetch(new URL("/opencodex-session", server.url));
+      const html = await bootstrap.text();
+      const token = html.match(/name="opencodex-session-token" content="([^"]+)"/)?.[1];
+      const csrf = html.match(/name="opencodex-session-csrf" content="([^"]+)"/)?.[1];
+      expect(token).toBeDefined();
+      expect(csrf).toBeDefined();
+      const headers = {
+        Origin: server.url.origin,
+        "x-opencodex-api-key": token!,
+        "x-opencodex-gui-origin": server.url.origin,
+      };
+      const url = new URL("/api/codex-auth/accounts/refresh", server.url);
+      const admin = await fetch(url, { method: "POST", headers: {
+        ...headers, "x-opencodex-api-key": "admin-secret", "x-opencodex-csrf-token": csrf!,
+      } });
+      expect(admin.status).toBe(200);
+      expect(warmups).toBe(0);
+      expect(readCodexAccountRecord(accountId)?.codexValidationPending).toBe(true);
+      const missing = await fetch(url, { method: "POST", headers });
+      expect(missing.status).toBe(401);
+      const crossOrigin = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, Origin: "http://attacker.test", "x-opencodex-csrf-token": csrf! },
+      });
+      expect(crossOrigin.status).toBe(401);
+      const allowed = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, "x-opencodex-csrf-token": csrf! },
+      });
+      expect(allowed.status).toBe(200);
+      expect(await allowed.json()).toHaveProperty("accounts");
+      expect(warmups).toBe(1);
+      expect(readCodexAccountRecord(accountId)?.codexValidationPending).toBeUndefined();
+    } finally {
+      await server.stop(true);
+      globalThis.fetch = originalFetch;
     }
   });
 
@@ -1575,13 +1774,17 @@ describe("management and data-plane credential separation", () => {
     saveConfig(remoteConfig());
     process.env.USERNAME ??= "tester";
     setPlatformForTests("win32");
-    // Env-token init never needs file ACL. Time out management-token paths so a
-    // broken file-backed ACL cannot be what made management available; allow
-    // other file hardens so startServer → saveConfig works on real win32
-    // (config-mutation directory harden soft-fails home timeouts).
+    // Env-token init never needs file ACL. Time out the management TOKEN FILE so a broken
+    // file-backed ACL cannot be what made management available; the assertion that the state's
+    // source is "environment" is what proves which path answered.
+    //
+    // The state directory itself is no longer timed out. It was never load-bearing for this
+    // claim, and it is hardened with required: true by the spend-journal owner during
+    // startServer, which correctly refuses rather than soft-failing: an unverified ACL on the
+    // directory holding a secret is not something to proceed past.
     setIcaclsRunnerForTests(args => {
       const target = args[0] ?? "";
-      if (target === testHome || target.endsWith("admin-api-token")) {
+      if (target.endsWith("admin-api-token")) {
         return { success: false, exitCode: null, timedOut: true, stdout: "" };
       }
       return { success: true, exitCode: 0, timedOut: false, stdout: "" };

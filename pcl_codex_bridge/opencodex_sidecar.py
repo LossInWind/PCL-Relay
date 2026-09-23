@@ -10,8 +10,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
 
-OPENCODEX_VERSION = "2.48.0"
-OPENCODEX_COMMIT = "9a27e86992d7a014e0aa92c046199b9fac148201"
+OPENCODEX_VERSION = "2.63.0"
+OPENCODEX_COMMIT = "96b1406cb63e429cec8d2e3914af4ba99f2e37b9"
 OPENCODEX_RUNTIME_BUN_VERSION = "1.3.14"
 OPENCODEX_RELEASE_ID = (
     f"{OPENCODEX_VERSION}-{OPENCODEX_COMMIT[:12]}-bun{OPENCODEX_RUNTIME_BUN_VERSION}"
@@ -399,6 +399,7 @@ def configure_sidecar(
         ["config", "set", "providers.openai.codexAccountMode", json.dumps("direct"), "--json"],
         ["config", "set", "defaultModelAliases", "false", "--json"],
         ["config", "set", "fastRows", "false", "--json"],
+        ["config", "set", "catalogAutoRefresh", '{"enabled":true,"intervalMinutes":60}', "--json"],
         ["config", "set", "emptyCompletionRetry", "true", "--json"],
         ["config", "set", "subagentModels", json.dumps(subagents), "--json"],
         ["config", "set", "multiAgentMode", json.dumps("v2"), "--json"],

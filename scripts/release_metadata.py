@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit public fallback metadata only after all platform assets are verified."""
+"""Emit public fallback metadata after verifying every supplied platform asset."""
 import hashlib
 import json
 import sys
@@ -14,7 +14,10 @@ def main():
     directory = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "dist"
     version = (ROOT / "pcl_codex_bridge/VERSION").read_text().strip()
     assets = []
-    for name in sorted(RELEASE_ASSET_NAMES):
+    names = sorted(name for name in RELEASE_ASSET_NAMES if (directory / name).is_file())
+    if not names:
+        raise RuntimeError("No supported release assets found")
+    for name in names:
         path = directory / name
         digest = hashlib.sha256()
         with path.open("rb") as handle:

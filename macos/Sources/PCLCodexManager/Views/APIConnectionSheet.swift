@@ -47,10 +47,10 @@ struct APIConnectionSheet: View {
                     Button("复制填写指引") { copy(info.setupGuide(modelIDs: models.map(\.id))) }
                 }
                 HStack {
-                    Button("复制 OpenCode 2.x 配置") { copy(info.clientConfiguration("opencode2", modelIDs: models.map(\.id))) }
+                    Button("复制 OpenCode 配置") { copy(info.clientConfiguration("opencode2", modelIDs: models.map(\.id))) }
                     Button("复制 Pi 配置") { copy(info.clientConfiguration("pi", modelIDs: models.map(\.id))) }
                 }
-                DisclosureGroup("旧版 OpenCode 1.x") {
+                DisclosureGroup("高级：旧版 OpenCode 1.x") {
                     Button("复制 OpenCode 1.x 配置") { copy(info.clientConfiguration("opencode", modelIDs: models.map(\.id))) }
                 }
                 Text("配置包含目录中的 \(models.count) 个文本模型，与 Codex 中是否勾选无关。OpenCode 合并到 ~/.config/opencode/opencode.json：2.x 用 providers，1.x 用 provider。Pi 合并到 ~/.pi/agent/models.json 的 providers。不要覆盖其他提供商配置。")

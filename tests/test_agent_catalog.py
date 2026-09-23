@@ -16,7 +16,7 @@ class AgentCatalogTests(unittest.TestCase):
             catalog.write_text('{"models":[{"slug":"gpt-6-sol","visibility":"list"}]}')
             self.assertEqual(maintain_catalog_roles(home, home)["status"], "disabled")
             self.assertFalse((home / "agents").exists())
-            config.write_text('{"clientIntegrations":{"codex":true}}')
+            config.write_text('{}')  # Upstream's default is enabled.
             self.assertEqual(maintain_catalog_roles(home, home)["status"], "success")
             self.assertEqual(maintain_catalog_roles(home, home)["status"], "unchanged")
             catalog.write_text('{"models":[{"slug":"gpt-next","visibility":"list"}]}')

@@ -92,7 +92,10 @@ def maintain_catalog_roles(config_home: Path | None = None, home: Path | None = 
     home = home or codex_home()
     try:
         config = json.loads((config_home / "config.json").read_text())
-        if config.get("clientIntegrations", {}).get("codex") is not True:
+        # Upstream desired-state: absent means enabled; only explicit false is off.
+        if (config.get("clientIntegrations", {}).get("codex") is False
+                or (config.get("runtimeRole") == "hub"
+                    and config.get("unauthenticatedLoopbackListener", {}).get("enabled") is not True)):
             return {"status": "disabled"}
         digest = hashlib.sha256((home / "opencodex-catalog.json").read_bytes()).hexdigest()
         stamp = config_home / "relay-agent-catalog.sha256"

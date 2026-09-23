@@ -2,25 +2,16 @@ import XCTest
 @testable import BridgeCore
 
 final class APIConnectionInfoTests: XCTestCase {
-    func testGuideMatchesFormAndDoesNotPromiseClientSupport() {
+    func testGenericGuideContainsEveryModelAndNoClientSpecificFormat() {
         let info = APIConnectionInfo(gateway: "http://100.1.2.3:15722/v1", modelID: "Kimi-K3")!
-        let guide = info.setupGuide(modelIDs: ["Kimi-K3", "GLM-5.2"])
-        for text in [info.baseURL, "请求头：留空", "模型 ID：Kimi-K3", "显示名称：GLM-5.2", "2.0.15", "其他版本仍需核对", "消耗少量额度"] {
+        let guide = info.setupGuide(modelIDs: ["Kimi-K3", "GLM-5.2", "Kimi-K3"])
+        for text in [info.baseURL, "请求头：留空", "模型 ID：Kimi-K3", "显示名称：GLM-5.2", "OpenAI 兼容", "不是客户端专用配置文件", "消耗少量额度"] {
             XCTAssertTrue(guide.contains(text), text)
         }
-        XCTAssertFalse(guide.contains("pcl/Kimi-K3"))
-    }
-    func testOpenCode2UsesActualServerSchema() throws {
-        let info = APIConnectionInfo(gateway: "http://100.1.2.3:15722", modelID: "Kimi-K3")!
-        let data = Data(info.clientConfiguration("opencode2", modelIDs: ["Kimi-K3", "GLM-5.2"]).utf8)
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        XCTAssertNil(json["provider"])
-        let provider = (json["providers"] as! [String: [String: Any]])["pcl-relay"]!
-        XCTAssertEqual(provider["package"] as? String, "@opencode/ai/providers/openai-compatible")
-        XCTAssertNil(provider["npm"])
-        XCTAssertNil(provider["options"])
-        XCTAssertEqual((provider["settings"] as! [String: String])["baseURL"], info.baseURL)
-        XCTAssertEqual((provider["models"] as! [String: Any]).count, 2)
+        for text in ["OpenCode", "opencode", "Pi 配置", "1.x", "pcl/Kimi-K3"] {
+            XCTAssertFalse(guide.contains(text), text)
+        }
+        XCTAssertEqual(guide.components(separatedBy: "模型 ID：Kimi-K3").count, 2)
     }
     func testExportUsesRawModelAndDoesNotClaimSecret() {
         let info = APIConnectionInfo(gateway: "http://100.1.2.3:15722/v1/", modelID: "Kimi-K3")!
@@ -35,17 +26,5 @@ final class APIConnectionInfoTests: XCTestCase {
         for url in ["file:///tmp/config", "http://user:secret@host/v1", "http://host/v1?key=secret"] {
             XCTAssertNil(APIConnectionInfo(gateway: url, modelID: "model"))
         }
-    }
-    func testOneProviderContainsEveryModelWithoutSelectionFilter() throws {
-        let info = APIConnectionInfo(gateway: "http://100.1.2.3:15722/v1", modelID: "Kimi-K3")!
-        let ids = ["Kimi-K3", "GLM-5.2", "DeepSeek-V4-Pro", "Kimi-K3"]
-        let pi = try JSONSerialization.jsonObject(with: Data(info.clientConfiguration("pi", modelIDs: ids).utf8)) as! [String: Any]
-        let providers = pi["providers"] as! [String: [String: Any]]
-        XCTAssertEqual(providers.count, 1)
-        XCTAssertEqual((providers["pcl-relay"]!["models"] as! [[String: String]]).count, 3)
-        let oc = try JSONSerialization.jsonObject(with: Data(info.clientConfiguration("opencode", modelIDs: ids).utf8)) as! [String: Any]
-        let models = ((oc["provider"] as! [String: [String: Any]])["pcl-relay"]!["models"] as! [String: Any])
-        XCTAssertEqual(Set(models.keys), Set(ids))
-        XCTAssertTrue(info.summary.contains("全部兼容模型"))
     }
 }

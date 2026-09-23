@@ -99,8 +99,10 @@ if (!shouldSyncCodexOnStart(config)) {
                 raise RuntimeError("upstream_catalog_refresh_incomplete")
             state.update(result_data)
             if state["status"] == "success":
+                from .agent_catalog import sync_catalog_roles
+                state["native_agents"] = sync_catalog_roles()
                 state["last_success"] = now
-                state["reload_required"] = bool(result_data.get("catalog_written"))
+                state["reload_required"] = bool(result_data.get("catalog_written") or state["native_agents"]["reload_required"])
         except Exception as exc:
             # Upstream stderr may contain provider URLs or account identifiers.
             state["error"] = (str(exc) if isinstance(exc, RuntimeError)

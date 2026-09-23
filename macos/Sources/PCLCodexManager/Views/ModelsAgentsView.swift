@@ -7,6 +7,7 @@ struct ModelsAgentsView: View {
     @State private var query = ""
     @State private var agentsOnly = true
     @State private var selectedModel: DiscoveredModel?
+    @State private var showAPIConnection = false
     private var visibleModels: [DiscoveredModel] {
         model.allDiscoveredModels.filter {
             (!agentsOnly || $0.agentEligible) && (query.isEmpty || "\($0.id) \($0.family) \($0.alias)".localizedCaseInsensitiveContains(query))
@@ -22,6 +23,7 @@ struct ModelsAgentsView: View {
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button("API 接入信息") { showAPIConnection = true }
                     Button(model.isDiscovering ? "读取中…" : "刷新模型目录", action: model.discoverModels)
                         .disabled(model.isDiscovering || model.isSavingAgents || model.isDetecting)
                     Button(model.isDetecting ? "停止实测" : "能力实测…") {
@@ -78,6 +80,7 @@ struct ModelsAgentsView: View {
         .sheet(item: $selectedModel) { item in
             ModelDetailSheet(item: item, status: model.registry?.models[item.alias], checkedAt: model.registry?.checkedAt)
         }
+        .sheet(isPresented: $showAPIConnection) { APIConnectionSheet().environmentObject(model) }
     }
     private func modelRow(_ item: DiscoveredModel) -> some View {
         let agent = AgentDefinition(model: item)

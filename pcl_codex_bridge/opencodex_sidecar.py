@@ -894,8 +894,11 @@ def activate_sidecar(
         and activated.get("state") == "current"
     ):
         raise RuntimeError("OpenCodex did not activate the Codex integration")
+    from .agent_catalog import sync_catalog_roles
+    native_agents = sync_catalog_roles()
     return {
         "active": True,
+        "native_agents": native_agents,
         "port": ready.get("port"),
         "pid": ready.get("pid"),
         "activation": activated,

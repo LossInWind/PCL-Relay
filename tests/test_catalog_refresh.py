@@ -12,6 +12,9 @@ from pcl_codex_bridge import catalog_refresh as catalog
 
 class CatalogRefreshTests(unittest.TestCase):
     def setUp(self):
+        roles = patch("pcl_codex_bridge.agent_catalog.sync_catalog_roles", return_value={"reload_required": False})
+        roles.start()
+        self.addCleanup(roles.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)

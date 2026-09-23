@@ -479,8 +479,6 @@ def _agent_role_text(role: str, model: str, description: str) -> str:
             f"description = {json.dumps(description)}",
             f"developer_instructions = {json.dumps(instructions)}",
             f"model = {json.dumps(PCL_MODEL_PREFIX + model)}",
-            'model_reasoning_effort = "high"',
-            'sandbox_mode = "workspace-write"',
             "",
         ]
     )

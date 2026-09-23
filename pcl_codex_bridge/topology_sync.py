@@ -957,6 +957,8 @@ def serve_sync(host: str = "0.0.0.0", port: int = DEFAULT_SYNC_PORT, token_file:
 
     def worker() -> None:
         while not stop.wait(max(5, int(interval))):
+            from .agent_catalog import maintain_catalog_roles
+            maintain_catalog_roles()
             sync_once(timeout=min(10, max(2, int(interval) - 1)))
 
     thread = threading.Thread(target=worker, name="pcl-relay-sync", daemon=True)

@@ -49,6 +49,11 @@ def fake_runtime(root: Path) -> Path:
 
 
 class OpenCodexSidecarTests(unittest.TestCase):
+    def setUp(self):
+        roles = mock.patch("pcl_codex_bridge.agent_catalog.sync_catalog_roles", return_value={"status": "success"})
+        roles.start()
+        self.addCleanup(roles.stop)
+
     def test_staged_new_cli_is_usable_without_changing_old_current_link(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

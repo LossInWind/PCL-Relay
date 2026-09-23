@@ -31,4 +31,25 @@ Reference: https://opencode.ai/docs/providers/#custom-provider
 No network policy, OpenCode binary, credentials, sessions, gateway runtime or
 upstream OpenCodex source was changed. Release build and 37 XCTest tests passed.
 These UI changes are source/build verified; they are not yet a published or
-installed release, and OpenCode integration remains blocked at its save entry.
+installed release.
+
+## Follow-up: supported file-based path verified
+
+The installed 2.0.15 server accepts `providers`, `package`, and `settings`.
+Its built-in adapter is `@opencode/ai/providers/openai-compatible`. This differs
+from the public 1.x `provider`, `npm`, and `options` example; Relay now exports
+both explicitly labeled formats instead of implying universal compatibility.
+
+Created the previously absent `~/.config/opencode/opencode.json` with one
+PCL provider and eight models, then used the supported `opencode reload`.
+The provider and all eight models appeared in the server API. A CLI session
+`ses_f3227dcbbffeKyW49esZd4JaHZ`, explicitly selecting
+`pcl-relay/DeepSeek-V4-Flash-0731`, returned `PCL_OK` without tools or file reads.
+
+Refreshed the desktop renderer. Its model-management toggles initially hid
+all models. Enabled only the PCL Relay group; verified all eight in the picker
+and selected DeepSeek V4 Pro. Existing other providers/settings were not changed.
+The form save bug is still present; file-based integration is now working.
+
+Upstream corroboration of the schema split:
+https://github.com/anomalyco/opencode/issues/41081

@@ -47,18 +47,21 @@ struct APIConnectionSheet: View {
                     Button("复制填写指引") { copy(info.setupGuide(modelIDs: models.map(\.id))) }
                 }
                 HStack {
-                    Button("复制 OpenCode JSON（官网格式）") { copy(info.clientConfiguration("opencode", modelIDs: models.map(\.id))) }
+                    Button("复制 OpenCode 2.x 配置") { copy(info.clientConfiguration("opencode2", modelIDs: models.map(\.id))) }
                     Button("复制 Pi 配置") { copy(info.clientConfiguration("pi", modelIDs: models.map(\.id))) }
                 }
-                Text("配置包含目录中的 \(models.count) 个文本模型，与 Codex 中是否勾选无关。OpenCode 合并到 opencode.json 的 provider；Pi 合并到 ~/.pi/agent/models.json 的 providers。不要覆盖其他提供商配置。")
+                DisclosureGroup("旧版 OpenCode 1.x") {
+                    Button("复制 OpenCode 1.x 配置") { copy(info.clientConfiguration("opencode", modelIDs: models.map(\.id))) }
+                }
+                Text("配置包含目录中的 \(models.count) 个文本模型，与 Codex 中是否勾选无关。OpenCode 合并到 ~/.config/opencode/opencode.json：2.x 用 providers，1.x 用 provider。Pi 合并到 ~/.pi/agent/models.json 的 providers。不要覆盖其他提供商配置。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("支持自动读取目录的客户端使用 /models。上述静态配置在新增模型后需重新复制；目录存在不代表每个模型已通过工具调用验收。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("3. 保存并验证").font(.headline)
-                Text("在客户端确认提供商和模型已出现，再明确选择一个 PCL 模型发送短消息。只有得到回复才算接入成功；仅复制或保存配置不算。")
+                Text("OpenCode 刷新界面后，在‘管理模型’打开 PCL Relay 分组；新模型可能默认隐藏。确认模型可选后发送短消息。只有得到回复才算接入成功；仅复制或保存配置不算。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 DisclosureGroup("遇到错误怎么办？") {
-                    Text("‘此服务器上无法使用自定义提供商’：检查客户端支持，重复改地址无效。\n超时 / 域名无法解析：检查该设备的 Tailnet 网络。\n401 / 403：确认错误来源和认证方式，不要使用 Codex 登录凭据。\n模型不存在：刷新模型目录并核对原始 ID。")
+                    Text("‘此服务器上无法使用自定义提供商’：本机 2.0.15 可改用上方 2.x 配置文件接入。\n超时 / 域名无法解析：检查该设备的 Tailnet 网络。\n401 / 403：确认错误来源和认证方式，不要使用 Codex 登录凭据。\n模型不存在：刷新模型目录并核对原始 ID。")
                         .font(.caption).fixedSize(horizontal: false, vertical: true)
                 }
                 DisclosureGroup("测试示例（只选择本次测试模型，不限制接入范围）") {

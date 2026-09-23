@@ -34,9 +34,15 @@ Release: https://github.com/LossInWind/PCL-Relay/releases/tag/v2.5.15
   it was not killed. Remote GUI reopening is not verified.
 - 3070Ti: GitHub download failed, so the identical verified Mac cache was used.
   Client 2.5.15 installed and model runtime 2.63.0 verified live; catalog refreshed.
-  PCL provider inherited a global proxy while its MagicDNS host was absent from
-  noProxy. Direct gateway requests succeeded. Set the upstream-supported
-  `providers.pcl.proxy=direct` and applied at an idle window; GPT proxy unchanged.
+  Initial live PCL requests returned 502 although old/new isolated runtimes and
+  direct gateway requests succeeded. Pinning Bun 1.3.14 alone did not resolve it;
+  neither did provider direct mode plus adding the MagicDNS host to noProxy.
+  Reusing the verified local gateway at `127.0.0.1:15722/v1` resolved the live
+  failure (HTTP 200, response.completed). The exact supervised MagicDNS transport
+  difference remains unproven; do not attribute it solely to Bun. The PCL provider
+  is direct and GPT's proxy is unchanged. The actual process uses pinned Bun
+  1.3.14, not the build dependency. This manual deployment initially omitted the
+  runtime override already supplied by Relay's invoke_sidecar; that was corrected.
 - A6000 Pod: package verified and staged under the persistent `/home/zhc` tree.
   No existing Relay/OpenCodex installation or listener was found. No new model
   route, authentication or supervisor was installed implicitly.

@@ -44,3 +44,15 @@ or left pending; installed version is not evidence of running activation.
   Control service reports 2.5.18; OpenCodex PID 1747 preserved.
 - Kai and A6000: Tailnet offline, SSH timed out; A6000 bootstrap SSH refused.
   They are pending, not upgraded. No forced network or daemon changes.
+- BUPT A100 (`bupt-vpn-recovery`): verified GitHub archive installed/staged at
+  2.5.18. No prior Relay installation was found for this user; no route/service
+  was enabled. One mixed/resumed transfer failed checksum and was rejected;
+  a separate exclusive GitHub download matched the published digest.
+- `10.112.205.245`: GitHub access failed, verified identical Mac cache installed
+  at 2.5.18; inactive control service left inactive. Existing OpenCodex 2.48.0
+  PID 1457 preserved, 2.63.0 runtime only staged (not activated).
+- Both BUPT installations passed before/after credential and Codex configuration
+  hash comparison. Mac and 3070Ti upgrades did not invoke integration enable.
+- OpenCode's six recent production assistant steps after activation ended with
+  tool-calls/stop and no stored error. This bounded observation does not close
+  the separate long-stream timeout investigation.

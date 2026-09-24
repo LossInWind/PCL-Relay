@@ -356,32 +356,68 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def _proxy_chat(self) -> None:
         raw_body = self._body()
+        request_id = uuid.uuid4().hex
+        started = time.monotonic()
+        headers_started = False
+        phase = "upstream_open"
+        forwarded = 0
+        outcome = "error"
+        error_type = "none"
+        log(f"chat request_id={request_id} outcome=started")
         try:
             with open_chat_completion_resilient(raw_body) as response:
+                phase = "downstream_headers"
+                # Once response output starts, a second HTTP response would corrupt
+                # the stream. This includes failures while flushing the headers.
+                headers_started = True
                 self.send_response(response.status)
+                self.send_header("X-Relay-Request-ID", request_id)
                 self.send_header("Content-Type", response.headers.get("Content-Type", "application/json"))
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "close")
                 self.end_headers()
                 if "text/event-stream" in response.headers.get("Content-Type", "").lower():
                     while True:
+                        phase = "upstream_read"
                         chunk = response.readline()
                         if not chunk:
                             break
+                        phase = "downstream_write"
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                        forwarded += len(chunk)
                 else:
                     reader = getattr(response, "read1", None) or response.read
                     while True:
+                        phase = "upstream_read"
                         chunk = reader(65536)
                         if not chunk:
                             break
+                        phase = "downstream_write"
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                        forwarded += len(chunk)
+                # EOF is transport evidence, not proof of model completion.
+                outcome = "upstream_eof"
         except urllib.error.HTTPError as exc:
-            self._json(exc.code, {"error": "upstream_error", "detail": exc.read().decode("utf-8", "replace")})
+            error_type = type(exc).__name__
+            exc.close()
+            if not headers_started:
+                phase = "downstream_error"
+                self._json(exc.code, {"error": "upstream_error", "request_id": request_id})
         except Exception as exc:
-            self._json(502, {"error": "gateway_error", "detail": str(exc)})
+            error_type = type(exc).__name__
+            if not headers_started:
+                phase = "downstream_error"
+                self._json(502, {"error": "gateway_error", "request_id": request_id})
+        finally:
+            # Never replay partial output or invent a finish_reason/[DONE].
+            self.close_connection = True
+            log(
+                f"chat request_id={request_id} outcome={outcome} phase={phase} "
+                f"error={error_type} bytes={forwarded} "
+                f"duration_ms={int((time.monotonic() - started) * 1000)}"
+            )
 
     def _responses(self) -> None:
         try:

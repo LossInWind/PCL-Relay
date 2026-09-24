@@ -101,6 +101,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
 }
 
 public struct RelayServerStatus: Codable, Equatable, Sendable {
+    public var chatDiagnostics: ChatDiagnosticsStatus? = nil
     public let status: String
     public let service: String
     public let nodeName: String
@@ -121,6 +122,45 @@ public struct RelayServerStatus: Codable, Equatable, Sendable {
         case listenHost = "listen_host"
         case uptimeSeconds = "uptime_seconds"
         case adminScope = "admin_scope"
+        case chatDiagnostics = "chat_diagnostics"
+    }
+}
+
+public struct ChatDiagnosticsStatus: Codable, Equatable, Sendable {
+    public let active: [ChatRequestStatus]
+    public let recent: [ChatRequestStatus]
+    public var summary: String {
+        let waiting = active.filter { $0.state == "waiting_upstream" }.count
+        let failed = recent.filter { ["incomplete_stream", "transport_error", "unconfirmed_end"].contains($0.state) }.count
+        return "Chat 请求：\(active.count) 个进行中，\(waiting) 个超过 60 秒未收到完整数据行；最近保留记录中 \(failed) 个异常或未确认结束。仅反映当前网关；不代表任务完成。"
+    }
+}
+
+public struct ChatRequestStatus: Codable, Equatable, Sendable {
+    public var displayState: String {
+        switch state {
+        case "waiting_upstream": return "等待上游（非已确认故障）"
+        case "receiving": return "正在接收"
+        case "connecting": return "等待响应"
+        case "forwarding": return "正在转发"
+        case "protocol_end_observed": return "协议结束已观察到（不代表任务完成）"
+        case "incomplete_stream": return "流结束不完整"
+        case "unconfirmed_end": return "结束状态未确认"
+        case "transport_error": return "传输异常"
+        default: return "传输已关闭"
+        }
+    }
+    public let requestID: String
+    public let state: String
+    public let durationMS: Int
+    public let lastDataAgeSeconds: Int
+    public let phase: String
+    public let error: String
+    enum CodingKeys: String, CodingKey {
+        case state, phase, error
+        case requestID = "request_id"
+        case durationMS = "duration_ms"
+        case lastDataAgeSeconds = "last_data_age_seconds"
     }
 }
 

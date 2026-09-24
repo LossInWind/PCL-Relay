@@ -77,6 +77,7 @@ extension AppModel {
             serverStatus = decoded
             remoteServiceActive = decoded.status == "active"
             remoteStatusText = "PID \(decoded.pid) · uptime \(decoded.uptimeSeconds)s · \(decoded.listenHost ?? decoded.tailscaleIP):\(decoded.port) · scope: \(decoded.adminScope.joined(separator: ", "))"
+            remoteStatusText += "\n" + (decoded.chatDiagnostics?.summary ?? "旧网关未提供 Chat 请求诊断；模型状态未知。")
         } catch {
             remoteServiceActive = false
             remoteStatusText = error.localizedDescription

@@ -362,6 +362,20 @@ struct ServerControlCard: View {
                         .lineLimit(4)
                         .textSelection(.enabled)
                 }
+                if let diagnostics = model.serverStatus?.chatDiagnostics {
+                    DisclosureGroup("Chat 请求诊断（检查服务器时更新）") {
+                        Text("仅当前网关的 Chat Completions 请求；不涵盖 OpenCodex 内部状态。超过 60 秒无完整数据行只作提示，不自动重试或断开。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        ForEach(diagnostics.active + Array(diagnostics.recent.prefix(8)), id: \.requestID) { request in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(request.displayState).font(.caption)
+                                Text("\(request.requestID) · \(request.durationMS / 1000)s · \(request.phase) · \(request.error)")
+                                    .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import __version__
+from .chat_diagnostics import CHAT_DIAGNOSTICS
 from .responses_protocol import (
     UPSTREAM_BASE,
     base_response,
@@ -146,6 +147,7 @@ def gateway_status() -> Dict[str, Any]:
         "uptime_seconds": max(0, int(time.time() - STARTED_AT)),
         "upstream": UPSTREAM_BASE,
         "admin_scope": ["status", "logs", "restart_self", "portal_proxy"],
+        "chat_diagnostics": CHAT_DIAGNOSTICS.snapshot(),
     }
 
 
@@ -363,10 +365,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
         forwarded = 0
         outcome = "error"
         error_type = "none"
+        CHAT_DIAGNOSTICS.start(request_id)
         log(f"chat request_id={request_id} outcome=started")
         try:
             with open_chat_completion_resilient(raw_body) as response:
                 phase = "downstream_headers"
+                streaming = "text/event-stream" in response.headers.get("Content-Type", "").lower()
+                CHAT_DIAGNOSTICS.phase(request_id, phase, streaming)
                 # Once response output starts, a second HTTP response would corrupt
                 # the stream. This includes failures while flushing the headers.
                 headers_started = True
@@ -379,10 +384,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if "text/event-stream" in response.headers.get("Content-Type", "").lower():
                     while True:
                         phase = "upstream_read"
+                        CHAT_DIAGNOSTICS.phase(request_id, phase)
                         chunk = response.readline()
                         if not chunk:
                             break
                         phase = "downstream_write"
+                        CHAT_DIAGNOSTICS.received(request_id, chunk)
+                        CHAT_DIAGNOSTICS.phase(request_id, phase)
                         self.wfile.write(chunk)
                         self.wfile.flush()
                         forwarded += len(chunk)
@@ -394,6 +402,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         if not chunk:
                             break
                         phase = "downstream_write"
+                        CHAT_DIAGNOSTICS.received(request_id, chunk)
                         self.wfile.write(chunk)
                         self.wfile.flush()
                         forwarded += len(chunk)
@@ -411,11 +420,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 phase = "downstream_error"
                 self._json(502, {"error": "gateway_error", "request_id": request_id})
         finally:
+            protocol_state = CHAT_DIAGNOSTICS.finish(request_id, outcome, phase, error_type)
             # Never replay partial output or invent a finish_reason/[DONE].
             self.close_connection = True
             log(
                 f"chat request_id={request_id} outcome={outcome} phase={phase} "
                 f"error={error_type} bytes={forwarded} "
+                f"protocol_state={protocol_state or 'untracked'} "
                 f"duration_ms={int((time.monotonic() - started) * 1000)}"
             )
 

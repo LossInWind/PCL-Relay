@@ -5,6 +5,7 @@ Only recognized diagnostic categories are exposed; unknown bodies remain private
 """
 import json
 import re
+import http.client
 
 MAX_ERROR_BYTES = 8192
 
@@ -24,7 +25,7 @@ def public_upstream_error(error, request_id):
             ):
                 message = "该模型不支持图片输入（not a multimodal model）；请在客户端声明文本输入能力，或使用已验证支持图片的模型。"
                 code = "unsupported_image_input"
-    except (ValueError, OSError, TypeError):
+    except (ValueError, OSError, TypeError, http.client.HTTPException):
         pass
     finally:
         error.close()

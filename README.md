@@ -1,5 +1,7 @@
 # PCL Relay
 
+OpenCode 接入：见[详细配置教程](docs/opencode-pcl-setup.md)，包括安全合并、文本模型能力声明、验证与回退；App 的“API 接入信息”保留通用 OpenAI 兼容字段和可复制配置。
+
 一个同时支持 macOS 与 Linux 的 PCL 模型路由器和 Codex 原生子 Agent 管理器。
 
 PCL Relay 只负责 endpoint/provider/model 路由、PCL gateway、Relay 心跳与模型拓扑同步、模型检测、PCL 门户和 Codex 接入，并内嵌完整、固定版本的 OpenCodex 数据面。网络连通、VPN/Clash/Tailscale/SSH 隧道和文件映射属于独立的外部基础设施；PCL Relay 默认收到的网络 endpoint 已经可用，且不与其他 App 交换状态。

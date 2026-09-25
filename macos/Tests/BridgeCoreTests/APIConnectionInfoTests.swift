@@ -2,6 +2,23 @@ import XCTest
 @testable import BridgeCore
 
 final class APIConnectionInfoTests: XCTestCase {
+    func testCurrentClientTemplateDeclaresOnlyVerifiedCapabilities() throws {
+        let info = APIConnectionInfo(gateway: "http://100.1.2.3:15722/v1", modelID: "GLM-5.2")!
+        let text = info.openCodeConfiguration(modelIDs: ["GLM-5.2", "DeepSeek-V4-Pro", "unverified"])
+        let object = try JSONSerialization.jsonObject(with: Data(text.utf8)) as! [String: Any]
+        let provider = (object["providers"] as! [String: Any])["pcl-relay"] as! [String: Any]
+        let models = provider["models"] as! [String: [String: Any]]
+        for id in ["GLM-5.2", "DeepSeek-V4-Pro"] {
+            let caps = models[id]!["capabilities"] as! [String: Any]
+            XCTAssertEqual(caps["input"] as? [String], ["text"])
+            XCTAssertEqual(caps["tools"] as? Bool, true)
+            XCTAssertNil(models[id]!["settings"])
+        }
+        XCTAssertEqual(models["unverified"]?["disabled"] as? Bool, true)
+        XCTAssertNil(object["model"])
+        XCTAssertFalse(text.contains("limit"))
+        XCTAssertTrue(APIConnectionInfo.capabilityNotice("unverified").contains("未"))
+    }
     func testGenericGuideContainsEveryModelAndNoClientSpecificFormat() {
         let info = APIConnectionInfo(gateway: "http://100.1.2.3:15722/v1", modelID: "Kimi-K3")!
         let guide = info.setupGuide(modelIDs: ["Kimi-K3", "GLM-5.2", "Kimi-K3"])

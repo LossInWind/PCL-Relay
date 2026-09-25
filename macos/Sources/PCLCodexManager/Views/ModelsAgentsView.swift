@@ -90,6 +90,8 @@ struct ModelsAgentsView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(item.id).font(.subheadline.weight(.semibold)).textSelection(.enabled)
                 Text("\(item.family) · \(categoryName(item.category))").font(.caption).foregroundStyle(.secondary)
+                Text(APIConnectionInfo.capabilityNotice(item.id))
+                    .font(.caption).foregroundStyle(.secondary)
                 if let warning = model.catalogWarning(for: item.id) {
                     Text(warning).font(.caption).foregroundStyle(.orange)
                 }

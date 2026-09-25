@@ -37,13 +37,28 @@ struct APIConnectionSheet: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 DisclosureGroup("2. 添加模型（\(models.count) 个，点击复制 ID）") {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(models) { item in field("模型 ID / 名称", item.id) }
+                        ForEach(models) { item in
+                            field("模型 ID / 名称", item.id)
+                            Text(APIConnectionInfo.capabilityNotice(item.id))
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }.padding(.top, 8)
                 }
                 HStack {
                     Button("复制全部接入信息") { copy(info.summary) }
                     Button("复制填写指引") { copy(info.setupGuide(modelIDs: models.map(\.id))) }
                 }
+                Text("模型能力与客户端配置").font(.headline)
+                Text("GLM-5.2、DeepSeek-V4-Pro 当前仅接受文本。带图片的历史切换模型时，由客户端按能力处理，Relay 不删除输入。通用字段不会自动声明这些限制。")
+                    .font(.caption).fixedSize(horizontal: false, vertical: true)
+                Button("复制 OpenCode 配置补充（当前版）") {
+                    copy(info.openCodeConfiguration(modelIDs: models.map(\.id)))
+                }
+                Text("将 providers.pcl-relay 合并到现有配置，勿覆盖其他提供商、skills 或插件。补充配置启用上述两个已验证文本模型；其他模型列出但暂禁用，逐项确认能力后再启用。已有配置只合并需要的模型字段，保留推理设置。图片可能不再发给文本模型，必要时先提供文字摘要。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("Kimi 回复执行意图后停止：不等于断网。保留原会话，整理已完成内容、实际文件及剩余任务，在独立会话先验证小任务；不要反复强迫一次生成整个脚本。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("当前目录包含 \(models.count) 个文本模型，与 Codex 中是否勾选无关。以上是通用接入字段，不是某个客户端的配置文件；请填入所用客户端的对应设置。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("新增模型后刷新客户端目录，或手动补充模型 ID。目录存在不代表每个模型已通过工具调用验收。")

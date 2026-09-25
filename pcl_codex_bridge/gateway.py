@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .chat_diagnostics import CHAT_DIAGNOSTICS
+from .upstream_errors import public_upstream_error
 from .responses_protocol import (
     UPSTREAM_BASE,
     base_response,
@@ -410,10 +411,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 outcome = "upstream_eof"
         except urllib.error.HTTPError as exc:
             error_type = type(exc).__name__
-            exc.close()
             if not headers_started:
                 phase = "downstream_error"
-                self._json(exc.code, {"error": "upstream_error", "request_id": request_id})
+                self._json(exc.code, public_upstream_error(exc, request_id))
+            else:
+                exc.close()
         except Exception as exc:
             error_type = type(exc).__name__
             if not headers_started:

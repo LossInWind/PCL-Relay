@@ -121,6 +121,16 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("1.3.14", script)
         self.assertIn("opencodex.UPSTREAM.json", script)
 
+    def test_chat_diagnostics_are_in_active_read_only_routing_view(self):
+        source = (PACKAGE.parent / "macos/Sources/PCLCodexManager/Views/RoutingView.swift").read_text()
+        self.assertIn("ChatDiagnosticsPanel()", source)
+        panel = source.split("private struct ChatDiagnosticsPanel: View", 1)[1].split("private struct OpenCodexProxyCard", 1)[0]
+        self.assertIn("await model.refreshRemoteStatus()", panel)
+        self.assertIn(".disabled(checking)", panel)
+        self.assertIn("历史结果", panel)
+        for mutation in ("restartGateway", "detectModels", "integrationEnable", ".onAppear", ".task"):
+            self.assertNotIn(mutation, panel)
+
     def test_release_bundles_exclude_quarantined_network_modules(self):
         root = PACKAGE.parent
         for script_name in ("build_macos_app.sh", "build_linux_bundle.sh"):

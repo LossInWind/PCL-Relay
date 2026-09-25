@@ -20,6 +20,7 @@ struct RoutingView: View {
                 DisclosureGroup("模型请求路径", isExpanded: $showPaths) {
                     RelayTopologyCanvas().padding(.top, 12)
                 }
+                ChatDiagnosticsPanel()
                 DisclosureGroup("高级设置", isExpanded: $showAdvanced) {
                     VStack(alignment: .leading, spacing: 16) {
                         HStack {
@@ -86,6 +87,56 @@ struct RoutingView: View {
                 }
                 HStack { Spacer(); Button("返回") { showUpgrade = false }.keyboardShortcut(.cancelAction) }
             }.padding(24).frame(width: 800)
+        }
+    }
+}
+
+private struct ChatDiagnosticsPanel: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var checking = false
+    @State private var checkedAt: Date?
+
+    var body: some View {
+        DisclosureGroup("Chat 请求诊断") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("只读取当前网关已有记录，不发送模型请求、不重试、不重启服务。不涵盖 OpenCodex 内部状态，也不将流结束当作任务完成。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button(checking ? "正在检查…" : "检查请求状态") {
+                        checking = true
+                        Task {
+                            await model.refreshRemoteStatus()
+                            checkedAt = Date()
+                            checking = false
+                        }
+                    }.disabled(checking)
+                    if let checkedAt {
+                        Text("检查时间 \(checkedAt.formatted(date: .omitted, time: .standard))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if checkedAt != nil {
+                    Text(model.remoteStatusText).font(.caption).textSelection(.enabled)
+                    if !model.remoteServiceActive {
+                        Text("检查失败；以下若有记录仅为历史结果，不代表当前状态。")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    if let diagnostics = model.serverStatus?.chatDiagnostics {
+                        Text(diagnostics.summary).font(.subheadline)
+                        ForEach(diagnostics.active + Array(diagnostics.recent.prefix(8)), id: \.requestID) { request in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(request.displayState).font(.caption)
+                                Text("\(request.requestID) · \(request.durationMS / 1000)s · \(request.phase) · \(request.error)")
+                                    .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                } else {
+                    Text("尚未检查。旧版网关可能不提供诊断；需要网关安全切换到新版后才能读取。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }.padding(.top, 10)
         }
     }
 }

@@ -9,14 +9,14 @@ description: opencodex 的开发环境、结构、约定，以及添加 provider
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex
 bun install
-bun run setup:hooks  # 安装 post-merge 并移除旧的托管 pre-push
+bun run setup:hooks  # 移除旧的托管 pre-push 和 post-merge
 bun run dev:proxy    # 开发模式代理 API
 bun run dev:gui      # 仪表盘 dev 服务器（另一个终端）
 bun run typecheck    # bun x tsc --noEmit
 bun run test        # 完整测试套件（默认）
 ```
 
-`bun run setup:hooks` 仅安装 `post-merge`，并移除未经修改的旧版托管 `pre-push` 钩子，
+`bun run setup:hooks` 移除未经修改的旧版托管 `pre-push` 和 `post-merge` 钩子，
 保留自定义钩子。`pre-push` 钩子不再是必需项；`bun run prepush` 仍可作为可选的手动检查。
 
 `bun run dev` 继续作为 `bun run dev:proxy` 的别名。仪表盘 dev 服务器使用 `bun run dev:gui`；
@@ -117,7 +117,7 @@ bun run release:watch               # 观察最新的 Release workflow run
   小而专注的 module 位于单一 `index.ts` 之后。
 - **在边界处理异步错误** —— sidecar 不会把异常抛进请求路径，而会降级成合适的 marker。
 - **Structure SOT** —— 当前维护者不变量放在 `structure/`；公开用户流程放在 `docs-site/`；
-  历史调查/诊断记录放在 `docs/`。
+  规划与调查记录放在 `devlog/`。
 - **保留 export** —— 其他 module 可能依赖它们。
 
 ## 向目录中添加 provider

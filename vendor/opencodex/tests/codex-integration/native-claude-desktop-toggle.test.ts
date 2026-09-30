@@ -55,6 +55,26 @@ async function toggle(enabled: boolean, deps: ManagementApiDeps = {}) {
   return { status: response!.status, body: await response!.json() as Record<string, unknown> };
 }
 
+test("native Desktop OFF publishes committed intent to the running config", async () => {
+  const live = config();
+  const response = await dispatch("/api/native-integrations/claude-desktop", {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: false }),
+  }, { removeDesktop3pStandardPivot: () => ({ ok: true, changed: false, kind: "noop", libraryPath: library }) }, live);
+  expect(response!.status).toBe(200);
+  expect(persistedIntent()).toBe(false);
+  expect(live.clientIntegrations?.["claude-desktop"]).toBe(false);
+});
+
+test("failed native Desktop intent write leaves the running config unchanged", async () => {
+  const live = config();
+  writeFileSync(join(root, "config.json"), "{");
+  const response = await dispatch("/api/native-integrations/claude-desktop", {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: false }),
+  }, {}, live);
+  expect(response!.status).not.toBe(200);
+  expect(live.clientIntegrations).toBeUndefined();
+});
+
 function oversizedTrackedBody(): {
   body: ReadableStream<Uint8Array>;
   stats: { pulls: number; cancelled: number; sentinelPulled: boolean };
@@ -283,6 +303,69 @@ test("auto-apply re-reads desired state after catalog fetch and skips a concurre
   release();
   expect((await request)!.status).toBe(200);
   expect(writes).toBe(0);
+});
+
+test("provider-change auto-apply preserves concurrent Desktop profile edits, deletions, and newer markers", async () => {
+  const profileA = {
+    version: 1 as const,
+    assignments: {},
+    defaults: { opus: null, fable: null, sonnet: null, haiku: null },
+    appliedFingerprint: "prior-fingerprint",
+    appliedAt: "2026-09-23T00:00:00.000Z",
+  };
+  const profileB = {
+    version: 1 as const,
+    assignments: { "mock/test-model": { family: "sonnet" as const, alias: "claude-opus-4-8-20260202" } },
+    defaults: { opus: null, fable: null, sonnet: "mock/test-model", haiku: null },
+  };
+  const id = "selected-owned";
+  mkdirSync(library);
+  writeFileSync(join(library, "_meta.json"), JSON.stringify({ appliedId: id, entries: [{ id, name: "opencodex" }] }));
+  writeFileSync(join(library, `${id}.json`), JSON.stringify({
+    inferenceProvider: "gateway", inferenceCredentialKind: "static",
+    inferenceGatewayBaseUrl: "fixture", inferenceGatewayApiKey: "not-a-secret",
+  }));
+
+  for (const change of ["edit", "delete-profile", "delete-subtree", "newer-marker", "newer-time"] as const) {
+    const starting = { ...config(), claudeCode: { desktopMode: "gateway" as const, desktopProfile: profileA, injectAgents: false } };
+    writeFileSync(join(root, "config.json"), JSON.stringify(starting));
+    let writes = 0;
+    const response = await dispatch("/api/subagent-models", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models: [] }),
+    }, {
+      fetchAllModels: async () => [],
+      writeDesktop3pConfig: (_port, _slugs, _models, _key, _mode, profile) => {
+        writes++;
+        expect(profile).toEqual(profileA);
+        const newer = JSON.parse(readFileSync(join(root, "config.json"), "utf8")) as OcxConfig;
+        if (change === "edit") newer.claudeCode = { ...newer.claudeCode, desktopProfile: profileB };
+        if (change === "delete-profile") delete newer.claudeCode!.desktopProfile;
+        if (change === "delete-subtree") delete newer.claudeCode;
+        if (change === "newer-marker") newer.claudeCode!.desktopProfile = {
+          ...profileA, appliedFingerprint: "newer-fingerprint", appliedAt: "2026-09-23T00:00:01.000Z",
+        };
+        if (change === "newer-time") newer.claudeCode!.desktopProfile = {
+          ...profileA, appliedAt: "2026-09-23T00:00:01.000Z",
+        };
+        writeFileSync(join(root, "config.json"), JSON.stringify(newer));
+        return { written: true, path: join(library, "new.json"), fingerprint: "0123456789abcdef" };
+      },
+    }, starting);
+    expect(response?.status).toBe(200);
+    expect(writes).toBe(1);
+    const saved = JSON.parse(readFileSync(join(root, "config.json"), "utf8")) as OcxConfig;
+    if (change === "edit") expect(saved.claudeCode?.desktopProfile).toEqual(profileB);
+    if (change === "delete-profile") expect(saved.claudeCode?.desktopProfile).toBeUndefined();
+    if (change === "delete-subtree") expect(saved.claudeCode).toBeUndefined();
+    if (change === "newer-marker") expect(saved.claudeCode?.desktopProfile).toEqual({
+      ...profileA, appliedFingerprint: "newer-fingerprint", appliedAt: "2026-09-23T00:00:01.000Z",
+    });
+    if (change === "newer-time") expect(saved.claudeCode?.desktopProfile).toEqual({
+      ...profileA, appliedAt: "2026-09-23T00:00:01.000Z",
+    });
+  }
 });
 
 test("explicit enable re-reads desired state after catalog fetch and skips a concurrent OFF", async () => {

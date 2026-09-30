@@ -6,12 +6,13 @@ import { ConfigMutationLockError, mutatePersistedConfig } from "../../config";
 import { reconcileMainCodexAccountRuntimeState } from "../account-lifecycle";
 import { isCodexAccountPaused, setCodexAccountPaused } from "../account-pause";
 import { getCodexAccountPriority } from "../account-priority";
+import { getCodexAccountAutoSwitchThresholdOverride } from "../account-auto-switch";
 import { clearThreadAccountMapForAccount, isCodexAccountPlanExcluded, reconcileCodexActiveAfterExclusion } from "../routing";
 import { codexPlanValue, isThirtyDayOnlyCodexPlan } from "../plan";
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
 import { getValidMainAccountToken, MainAccountTokenRefreshError, MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
-import { captureMainAccountIdentityGeneration, getMainAccountCredentialPresence, isMainAccountIdentityGenerationLive } from "../main-account-cache";
+import { captureMainAccountIdentityGeneration, getMainAccountCredentialPresence, getMainAccountInfoCache, isMainAccountIdentityGenerationLive } from "../main-account-cache";
 import type { CodexQuotaRefreshOutcome } from "../quota-refresh-outcome";
 import { getMainAccountHardLockStatus } from "../main-account-hard-lock";
 import type { MainAccountHardLockStatus } from "../main-account-hard-lock";
@@ -134,6 +135,7 @@ export function poolAccountDto(
     isMain: false,
     paused,
     priority,
+    autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(config, account.id),
     quota: quota ? { ...quota } : null,
     needsReauth: needsReauth || health.status === "reauth_required",
     ...(reauthReason !== undefined ? { reauthReason } : {}),
@@ -157,6 +159,8 @@ export interface CodexAuthAccountDto {
   paused: boolean;
   /** Selection order; higher is used earlier. Always present, 0 when unset. */
   priority: number;
+  /** Null inherits the global usage-switch threshold; 0 disables it for this account. */
+  autoSwitchThresholdOverride: number | null;
   quota: (StoredAccountQuota | (Omit<StoredAccountQuota, "updatedAt"> & { updatedAt: number })) | null;
   needsReauth?: boolean;
   /**
@@ -252,7 +256,8 @@ export async function listCodexAuthAccountsSnapshot(
   const poolAccounts = (runtimeConfig.codexAccounts ?? []).filter(isSelectableCodexPoolAccount);
   // One redaction decision for the whole snapshot, read once from the operator's config (#3859).
   const maskEmails = emailMaskingEnabled(runtimeConfig);
-  const mainResult = await fetchMainAccountInfoAttempt(forceRefresh, 1);
+  const mainResult = await fetchMainAccountInfoAttempt(forceRefresh, 1, undefined, false,
+    forceRefresh, false, runtimeConfig);
   const refreshedPool = await mapWithConcurrency(poolAccounts, POOL_QUOTA_REFRESH_CONCURRENCY, async account => {
     const cred = getCodexAccountCredential(account.id);
     let quotaResult: PoolQuotaResult;
@@ -323,7 +328,11 @@ export async function listCodexAuthAccountsSnapshot(
   });
   const fetchedMainGeneration = mainResult.identityGeneration ?? captureMainAccountIdentityGeneration();
   const mainSnapshotLive = isMainAccountIdentityGenerationLive(fetchedMainGeneration);
-  const mainInfo = mainSnapshotLive ? mainResult.info : EMPTY_MAIN_ACCOUNT_INFO;
+  // An ordinary same-account return can be parsed after its credential was replaced.
+  // The card and hard-lock status must describe the same published quota snapshot.
+  const mainInfo = mainSnapshotLive
+    ? mainResult.infoUnpublished ? getMainAccountInfoCache() ?? EMPTY_MAIN_ACCOUNT_INFO : mainResult.info
+    : EMPTY_MAIN_ACCOUNT_INFO;
   const hasMainCredential = mainSnapshotLive && mainResult.credentialChecked
     ? mainResult.hasCredential
     : getMainAccountCredentialPresence() ?? false;
@@ -353,6 +362,7 @@ export async function listCodexAuthAccountsSnapshot(
     paused: isCodexAccountPaused(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
     mainAccountHardLock: getMainAccountHardLockStatus(runtimeConfig),
     priority: getCodexAccountPriority(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+    autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
     hasCredential: hasMainCredential,
     needsReauth: mainNeedsReauth,
     ...(mainReauthReason !== undefined ? { reauthReason: mainReauthReason } : {}),
@@ -390,7 +400,7 @@ export async function refreshCodexQuotaForActivation(config: OcxConfig, accountI
         return;
       }
       if (isAccountNeedsReauth(accountId)) return;
-      await fetchMainAccountInfoAttempt(true, 1, lease, false, false);
+      await fetchMainAccountInfoAttempt(true, 1, lease, false, false, false, config);
     } finally {
       lease.release();
     }
@@ -437,7 +447,8 @@ export async function pauseExhaustedCodexAccounts(
         failedAccountCount: number;
       }> => {
         if (!mainLease) return { shouldPause: false, checkedAccountCount: 0, failedAccountCount: 1 };
-        const mainResult = await fetchMainAccountInfoAttempt(true, 1, mainLease, true);
+        const mainResult = await fetchMainAccountInfoAttempt(true, 1, mainLease, true,
+          true, false, config);
         if (!mainResult.credentialChecked || !mainResult.hasCredential) {
           return { shouldPause: false, checkedAccountCount: 0, failedAccountCount: 0 };
         }

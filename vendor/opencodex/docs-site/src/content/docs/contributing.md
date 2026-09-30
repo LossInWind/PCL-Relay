@@ -12,19 +12,23 @@ Bun runtime for users, but this checkout's scripts run through your local Bun in
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex
 bun install
-bun run setup:hooks  # install post-merge; retire the managed pre-push hook
+bun run setup:hooks  # retire the managed pre-push and post-merge hooks
 bun run dev:proxy    # proxy API in dev mode
 bun run dev:gui      # dashboard dev server (another terminal)
 bun run typecheck    # bun x tsc --noEmit
 bun run test        # full suite (default)
 ```
 
-`bun run setup:hooks` installs only `post-merge` and removes an unmodified retired managed
-`pre-push` hook, preserving custom hooks. A pre-push hook is no longer required.
+`bun run setup:hooks` removes an unmodified retired managed `pre-push` or `post-merge`
+hook, preserving custom hooks. A pre-push hook is no longer required.
 `bun run prepush` remains an optional manual check.
 
 `bun run dev` remains an alias for `bun run dev:proxy`. The dashboard dev server is `bun run dev:gui`;
 the packaged dashboard at `GET /` is produced by `bun run build:gui` (`gui/dist`).
+
+The retired `post-merge` hook used to rebuild `gui/dist` after every merge. With the hook gone,
+a merge that changes `gui/` leaves the packaged dashboard stale until you run `bun run build:gui`
+yourself — the dev server is unaffected because it rebuilds on demand.
 
 ## Build and test commands
 
@@ -154,7 +158,7 @@ description.
 - Target **`dev`**. Do not open feature or fix pull requests against **`main`**.
 - Branch from the current **`dev`** tip, not from **`main`**. The required **`enforce-target`** check rejects heads whose merge base sits on the **`main`** tip while the branch is far behind the pull request base (the failure mode seen in #644).
 - Write a real description: a **Summary** of what changed and why, plus a **Test plan** (or equivalent substance). Empty bodies, placeholder-only text, and descriptions that use escaped `\n` instead of real line breaks fail the check.
-- If the title or description mentions `gui`, include a screenshot of the UI change in the description; the `enforce-target` check re-runs on description edits until the screenshot is present.
+- If the pull request changes files under `gui/`, include a screenshot of the UI change in the description; the `enforce-target` check re-runs on description edits until the screenshot is present. Drag the image into the description editor rather than committing it: an image on your branch rides the squash merge into `dev`. Maintainers uploading from the command line use the `pr-assets` branch and link by commit SHA.
 - Workflow changes in this repository use **`pull_request_target`**. Updated enforcement logic applies only after the workflow is promoted to the repository default branch — the same operational caveat documented in #631.
 
 ## Project maintainers
@@ -177,7 +181,7 @@ does not change `main`/`preview` review rules or allow direct pushes, force-push
 - **Handle async errors at boundaries** — sidecars never throw into the request path; they degrade to
   a graceful marker.
 - **Structure SOT** — current maintainer invariants live in `structure/`. Keep public user workflows
-  in `docs-site/` and historical investigation notes in `docs/`.
+  in `docs-site/` and planning and investigation notes in `devlog/`.
 - **Preserve exports** — other modules may depend on them.
 
 ## Adding a provider to the catalog

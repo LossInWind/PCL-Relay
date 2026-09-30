@@ -30,6 +30,16 @@ from pcl_codex_bridge.relay_discovery import find_tailscale
 
 
 class ClientConfigTests(unittest.TestCase):
+    def test_codex_runtime_discovery_supports_nested_desktop_layout(self):
+        binary = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
+        with mock.patch.dict(os.environ, {"PCL_CODEX_BIN": ""}), mock.patch(
+            "pathlib.Path.is_file", lambda path: path == binary
+        ), mock.patch("pcl_codex_bridge.client_config.os.access", return_value=True), mock.patch(
+            "pcl_codex_bridge.client_config.subprocess.run",
+            return_value=mock.Mock(returncode=0, stdout="codex-cli 0.159.0"),
+        ):
+            self.assertEqual(find_codex(), str(binary))
+
     def test_codex_runtime_discovery_follows_explicit_persistent_codex_home(self):
         with tempfile.TemporaryDirectory() as temp:
             home, pvc = Path(temp) / "home", Path(temp) / "pvc"

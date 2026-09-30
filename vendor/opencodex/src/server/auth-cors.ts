@@ -1,5 +1,5 @@
 import { providerRelativeSendPathConfigError } from "../config/provider-relative-send-path";
-import { modelCapabilitiesConfigError } from "../config/provider-validation";
+import { contextTierRecordConfigError, modelCapabilitiesConfigError } from "../config/provider-validation";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { initialModelSelection } from "../providers/initial-model-selection";
 import { extractAccountId } from "../oauth/chatgpt";
@@ -16,6 +16,7 @@ import {
 } from "../config";
 import {
   apiKeyTransportConfigError,
+  projectContextConfigError,
   autoReviewModelOverridesConfigError,
   autoReviewModelTargetConfigError,
   booleanRecordConfigError,
@@ -312,14 +313,29 @@ export function isApiAuthRequired(config: Pick<OcxConfig, "hostname">): boolean 
  * So this type is deliberately narrow: it cannot masquerade as a business config, and a policy
  * view that leaks into a routing path fails to typecheck rather than silently taking effect.
  */
-export type RequestPolicyView = Pick<OcxConfig, "hostname" | "corsAllowOrigins" | "apiKeys">;
+export interface LinkIngressPolicy {
+  allowedKeyIds: ReadonlySet<string>;
+}
+
+export type RequestPolicyView = Pick<OcxConfig, "hostname" | "corsAllowOrigins" | "apiKeys"> & {
+  linkIngress?: LinkIngressPolicy;
+};
+
+export type DataPlaneAdmissionOptions = {
+  linkIngress?: ReadonlySet<string>;
+};
 
 /** Derive the per-request policy view for a listener. Cheap enough to build per request. */
-export function requestPolicyView(config: OcxConfig, bindHostname: string): RequestPolicyView {
+export function requestPolicyView(
+  config: OcxConfig,
+  bindHostname: string,
+  linkIngress?: LinkIngressPolicy,
+): RequestPolicyView {
   return {
     hostname: bindHostname,
     ...(config.corsAllowOrigins ? { corsAllowOrigins: config.corsAllowOrigins } : {}),
     ...(config.apiKeys ? { apiKeys: config.apiKeys } : {}),
+    ...(linkIngress ? { linkIngress } : {}),
   };
 }
 
@@ -398,13 +414,15 @@ export function resolveDataPlaneAdmissionSecret(
   token: string,
   config: Pick<OcxConfig, "apiKeys">,
   source: DataPlaneAdmissionSource = "dedicated",
+  options: DataPlaneAdmissionOptions = {},
 ): DataPlaneAdmission | null {
   const actual = token.trim();
   if (!actual) return null;
-  if (secretEquals(actual, configuredApiAuthToken(config))) {
+  if (!options.linkIngress && secretEquals(actual, configuredApiAuthToken(config))) {
     return { kind: "environment", source, contextPrincipalId: mintContextPrincipal("environment", "", actual) };
   }
   for (const k of config.apiKeys ?? []) {
+    if (options.linkIngress && !options.linkIngress.has(k.id)) continue;
     if (secretEquals(actual, k.key)) {
       return { kind: "configured", keyId: k.id, source, contextPrincipalId: mintContextPrincipal("configured", k.id, actual) };
     }
@@ -555,12 +573,12 @@ export function resolveApiAuth(req: Request, config: RequestPolicyView): DataPla
   // A loopback bind never reads a token at all, so there is no key to name.
   if (!isApiAuthRequired(config)) return { kind: "loopback", source: "loopback" };
   const dedicated = req.headers.get("x-opencodex-api-key")?.trim();
-  if (dedicated) return resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated");
+  if (dedicated) return resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated", { linkIngress: config.linkIngress?.allowedKeyIds });
   const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
-  if (bearer) return resolveDataPlaneAdmissionSecret(bearer, config, "bearer");
+  if (bearer) return resolveDataPlaneAdmissionSecret(bearer, config, "bearer", { linkIngress: config.linkIngress?.allowedKeyIds });
   // Anthropic-SDK clients (Claude Code with ANTHROPIC_API_KEY) authenticate via x-api-key.
   const apiKey = req.headers.get("x-api-key")?.trim();
-  if (apiKey) return resolveDataPlaneAdmissionSecret(apiKey, config, "x-api-key");
+  if (apiKey) return resolveDataPlaneAdmissionSecret(apiKey, config, "x-api-key", { linkIngress: config.linkIngress?.allowedKeyIds });
   return null;
 }
 
@@ -582,14 +600,14 @@ export function resolveResponsesApiAuth(req: Request, config: RequestPolicyView)
   if (!isApiAuthRequired(config)) return { kind: "loopback", source: "loopback" };
   // The dedicated header still WINS, because it is unambiguous.
   const dedicated = req.headers.get("x-opencodex-api-key")?.trim();
-  if (dedicated) return resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated");
+  if (dedicated) return resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated", { linkIngress: config.linkIngress?.allowedKeyIds });
   // #1686: a bearer may also be one of OUR admission secrets. Rejecting it outright meant a
   // Codex client configured with `env_key` could not reach Direct at all. Admitting it is only
   // safe because the upstream credential is then SUBSTITUTED rather than forwarded -- see
   // materializeCodexUpstreamAuth. A bearer that is NOT our secret stays unadmitted here and
   // remains Codex Direct passthrough, so the two bearer domains still never mix.
   const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
-  if (bearer) return resolveDataPlaneAdmissionSecret(bearer, config, "bearer");
+  if (bearer) return resolveDataPlaneAdmissionSecret(bearer, config, "bearer", { linkIngress: config.linkIngress?.allowedKeyIds });
   // `x-api-key` is deliberately NOT accepted on this transport.
   return null;
 }
@@ -676,6 +694,8 @@ export function providerManagementConfigError(
     return "provider must be a plain object";
   }
   const raw = provider as Record<string, unknown>;
+  const contextTiersError = contextTierRecordConfigError(raw.modelContextTiers);
+  if (contextTiersError) return contextTiersError;
   const capabilitiesError = modelCapabilitiesConfigError(raw.modelCapabilities);
   if (capabilitiesError) return capabilitiesError;
   const pinsError = providerReasoningPinsConfigError(raw);
@@ -744,6 +764,12 @@ export function providerManagementConfigError(
     // validation and then rejected by the seed comparison, so canonical OpenAI could never
     // set OR clear it — the value was admitted and then refused in the same request.
     delete canonicalCandidate.annotateEmptyToolOutputs;
+    // Canonical ChatGPT keeps WebSocket as the default, but an operator may
+    // select the existing HTTP/SSE path without changing its auth or endpoint.
+    if (raw.upstreamWebsocket !== undefined) {
+      if (raw.upstreamWebsocket !== false) return "provider openai upstreamWebsocket must be false or omitted";
+      delete canonicalCandidate.upstreamWebsocket;
+    }
     const canonical = seed && (options?.allowOperatorOverlays
       ? matchesCanonicalProviderSeed(canonicalCandidate, seed)
       : sameCanonicalProviderSeed(canonicalCandidate, seed));
@@ -805,6 +831,8 @@ export function providerManagementConfigError(
   }
   const apiKeyTransportError = apiKeyTransportConfigError(typed);
   if (apiKeyTransportError) return `provider ${name} ${apiKeyTransportError}`;
+  const projectContextError = projectContextConfigError(typed);
+  if (projectContextError) return `provider ${JSON.stringify(redactSecretString(name))} ${projectContextError}`;
   const maxInputError = positiveIntegerRecordConfigError(raw.modelMaxInputTokens, "modelMaxInputTokens");
   if (maxInputError) return `provider ${name} ${maxInputError}`;
   const autoCompactError = modelAutoCompactTokenLimitsConfigError(
@@ -818,6 +846,8 @@ export function providerManagementConfigError(
   if (reasoningSummariesError) return `provider ${name} ${reasoningSummariesError}`;
   const suppressSyntheticMaxError = booleanRecordConfigError(raw.modelSuppressSyntheticMax, "modelSuppressSyntheticMax");
   if (suppressSyntheticMaxError) return `provider ${name} ${suppressSyntheticMaxError}`;
+  const verbositySupportError = booleanRecordConfigError(raw.modelSupportsVerbosity, "modelSupportsVerbosity");
+  if (verbositySupportError) return `provider ${name} ${verbositySupportError}`;
   const reasoningSummaryDeliveryError = reasoningSummaryDeliveryRecordConfigError(
     raw.modelReasoningSummaryDelivery,
     raw.modelSupportsReasoningSummaries,
@@ -942,12 +972,15 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   defaultAliases: "editor",
   adapter: "editor",
   codexToolMode: "editor",
+  projectContext: "editor",
   requestPacing: "editor",
   mcpMaxTools: "editor",
   mcpMaxSchemaBytes: "editor",
   mcpMaxResultBytes: "editor",
   modelAdapters: "editor",
   fastWire: "editor",
+  responseTierAuthoritative: "editor",
+  fastEnabled: "editor",
   baseUrl: "editor",
   responsesPath: "editor",
   chatCompletionsPath: "editor",
@@ -994,6 +1027,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   modelPreset: "editor",
   contextWindow: "editor",
   modelContextWindows: "editor",
+  modelContextTiers: "editor",
   modelInputModalities: "editor",
   modelCapabilities: "editor",
   modelMaxInputTokens: "runtime",
@@ -1040,6 +1074,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   noReasoningModels: "editor",
   noTemperatureModels: "editor",
   noTopPModels: "editor",
+  noStopModels: "editor",
   noPenaltyModels: "editor",
   noStructuredOutputModels: "editor",
   noJsonSchemaModels: "editor",
@@ -1056,10 +1091,12 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   preserveReasoningContentModels: "editor",
   requiresReasoningPlaceholderModels: "editor",
   showThinkingSummary: "editor",
+  hideRawReasoning: "editor",
   retryOn429: "editor",
   transientRetryOn5xx: "editor",
   retryOnReset: "editor",
   reasoningSplitModels: "editor",
+  inlineThinkTagModels: "editor",
   reasoningDetailsModels: "editor",
   thinkingToggleModels: "editor",
   thinkingBudgetModels: "editor",

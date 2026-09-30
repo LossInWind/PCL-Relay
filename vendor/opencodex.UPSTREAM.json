@@ -1,9 +1,9 @@
 {
   "name": "OpenCodex",
   "repository": "https://github.com/lidge-jun/opencodex.git",
-  "commit": "96b1406cb63e429cec8d2e3914af4ba99f2e37b9",
-  "tree": "22639518db6eab88525f7f0932cc4a81a7573b6d",
-  "version": "2.63.0",
+  "commit": "0cdf0f1f6457ab0378047ef2bbf143cf1263341b",
+  "tree": "58986b4eb5840eb28f3815a35a0b1bcb575fb771",
+  "version": "2.73.0-preview.20260930",
   "license": "MIT",
   "integration": "complete pinned sidecar; PCL adapter does not reimplement transport"
 }

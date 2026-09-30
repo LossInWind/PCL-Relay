@@ -208,7 +208,7 @@ describe("anySignal", () => {
 
 describe("devin cloud request shape", () => {
   // The bug this guards: #2 and #3 were swapped, so a caller asking for 32
-  // output tokens wrote 32 into the context-window field and Cognition answered
+  // output tokens wrote 32 into #3 (max_newlines) and Cognition answered
   // every single turn with an opaque "an internal error occurred" - on free and
   // paid accounts alike. Verified on 2026-09-12 by building the same turn with a
   // working client and diffing the encoded messages field by field.
@@ -229,12 +229,12 @@ describe("devin cloud request shape", () => {
       ...(completionOpts ? { completionOpts } : {}),
     });
 
-  test("the output cap lands in #2 and the context window in #3", () => {
-    const outer = fields(build({ maxOutputTokens: 64, maxInputTokens: 200_000 }));
+  test("the output cap lands in #2 and max_newlines in #3", () => {
+    const outer = fields(build({ maxOutputTokens: 64 }));
     const completion = outer[8]?.value as Buffer;
     const inner = fields(completion);
     expect(inner[2]).toEqual({ wire: 0, value: 64n });
-    expect(inner[3]).toEqual({ wire: 0, value: 200_000n });
+    expect(inner[3]).toEqual({ wire: 0, value: 128_000n });
     // #6 and #11 are not part of the message the service accepts.
     expect(inner[6]).toBeUndefined();
     expect(inner[11]).toBeUndefined();
@@ -725,5 +725,72 @@ describe("devin cloud trailer errors", () => {
       globalThis.fetch = originalFetch;
       clearCachedCatalog();
     }
+  });
+});
+
+describe("devin rejected HTTP response ownership", () => {
+  for (const status of [401, 429, 503]) {
+    for (const mode of ["resolve", "reject", "throw", "pending"] as const) {
+      test(`HTTP ${status}: cancel ${mode} preserves the original CloudChatError`, async () => {
+        const cancellations: unknown[] = [];
+        const pending = Promise.withResolvers<void>();
+        let pulls = 0;
+        const body = new ReadableStream<Uint8Array>({
+          pull() { pulls++; },
+          cancel(reason) {
+            cancellations.push(reason);
+            if (mode === "reject") return Promise.reject(new Error("cancel rejected"));
+            if (mode === "pending") return pending.promise;
+          },
+        }, { highWaterMark: 0 });
+        if (mode === "throw") {
+          // Real stream callbacks turn throws into rejected promises. Exercise
+          // the separate boundary for a transport that throws from cancel itself.
+          body.cancel = reason => {
+            cancellations.push(reason);
+            throw new Error("cancel threw");
+          };
+        }
+        const response = new Response(body, { status });
+        const events = streamChatEvents({
+          apiKey: "fixture-http-cancellation",
+          modelUid: "swe-2-high",
+          messages: [{ role: "user", content: "hi" }],
+          catalog: null,
+          executor: async () => response,
+        });
+        try {
+          const error = await events.next().catch(error => error);
+          expect(error).toBeInstanceOf(CloudChatError);
+          expect(error.message).toBe(`GetChatMessage failed (HTTP ${status})`);
+          expect(error.status).toBe(status);
+          expect(error.code).toBeUndefined();
+          expect(error.traceId).toBeUndefined();
+          expect(cancellations).toHaveLength(1);
+          expect(cancellations[0]).toBe(error);
+          expect(pulls).toBe(0);
+          expect(body.locked).toBe(false);
+          expect((await events.next()).done).toBe(true);
+          // Give a rejected cancel the chance to become an unhandled rejection.
+          await new Promise(resolve => setTimeout(resolve, 0));
+        } finally {
+          pending.resolve();
+          await events.return(undefined);
+        }
+      });
+    }
+  }
+
+  test("a bodyless HTTP error retains its status", async () => {
+    const events = streamChatEvents({
+      apiKey: "fixture-http-cancellation",
+      modelUid: "swe-2-high",
+      messages: [],
+      catalog: null,
+      executor: async () => new Response(null, { status: 403 }),
+    });
+    await expect(events.next()).rejects.toMatchObject({
+      name: "CloudChatError", status: 403, message: "GetChatMessage failed (HTTP 403)",
+    });
   });
 });

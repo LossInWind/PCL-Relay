@@ -1180,7 +1180,14 @@ def find_codex() -> Optional[str]:
     override = os.environ.get("PCL_CODEX_BIN")
     if override and usable(Path(override)):
         return override
-    candidates = [Path("/Applications/ChatGPT.app/Contents/Resources/codex")]
+    # Desktop updates can move the CLI into a signed nested bundle. Probe the
+    # current layouts before the legacy location; never persist a missing path.
+    candidates = [
+        Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"),
+        Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"),
+        Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+        Path("/Applications/Codex.app/Contents/Resources/codex"),
+    ]
     # Pods may keep both .codex and VS Code on a persistent volume, with only
     # .codex linked from HOME. Search that explicit user-selected location too.
     homes = list(dict.fromkeys([Path.home(), codex_home().resolve().parent]))

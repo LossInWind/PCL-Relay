@@ -8,7 +8,10 @@ Thanks for helping with opencodex.
 - Current maintainer invariants live in [`structure/`](./structure); start at [`structure/INDEX.md`](./structure/INDEX.md)
 - Maintainer roles and merge policy live in [`MAINTAINERS.md`](./MAINTAINERS.md)
 - Attribution for work landed through a maintainer carry lives in [`CREDITS.md`](./CREDITS.md)
-- Historical investigations live in [`docs/`](./docs)
+- Planning and investigation notes live in [`devlog/`](./devlog); older retired notes remain in git history
+- PR screenshots go in the pull request description, never on your branch: drag the image into the
+  description editor, or, with push access, commit it to the `pr-assets` branch and link it by commit SHA
+  (see that branch's README). Evidence images committed to a PR branch ride the squash merge into `dev`.
 
 ## Branches
 
@@ -69,9 +72,10 @@ validation policy; required CI must pass on the current PR head before merge.
 bun run setup:hooks
 ```
 
-This installs the `post-merge` hook, which rebuilds the packaged dashboard when a
-merge changes its source. It also removes the unmodified, retired repository
-pre-push hook from Git's resolved hooks directory, including linked worktrees
-and `core.hooksPath` setups. Custom pre-push hooks are preserved. Validation no
-longer runs automatically on every push; existing contributors should rerun the
-setup command once to migrate their hooks.
+This removes the unmodified, retired repository `pre-push` and `post-merge` hooks
+from Git's resolved hooks directory, including linked worktrees and
+`core.hooksPath` setups. Custom hooks are preserved. The managed post-merge hook
+was retired because it executed pulled code on every merge; rebuild the packaged
+dashboard explicitly with `bun run build:gui` after a merge that changes `gui/`
+sources. Validation no longer runs automatically on every push; existing
+contributors should rerun the setup command once to migrate their hooks.

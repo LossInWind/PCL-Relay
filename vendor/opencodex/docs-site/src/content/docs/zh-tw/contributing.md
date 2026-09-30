@@ -9,14 +9,14 @@ description: opencodex 的開發環境、結構、約定，以及新增 provider
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex
 bun install
-bun run setup:hooks  # 安裝 post-merge 並移除舊的受管理 pre-push
+bun run setup:hooks  # 移除舊的受管理 pre-push 與 post-merge
 bun run dev:proxy    # 開發模式代理 API
 bun run dev:gui      # 儀表板 dev 伺服器（另一個終端）
 bun run typecheck    # bun x tsc --noEmit
 bun run test        # 完整測試套件（預設）
 ```
 
-`bun run setup:hooks` 僅安裝 `post-merge`，並移除未經修改的舊版受管理 `pre-push` 掛鉤，
+`bun run setup:hooks` 移除未經修改的舊版受管理 `pre-push` 與 `post-merge` 掛鉤，
 保留自訂掛鉤。`pre-push` 掛鉤不再是必要項目；`bun run prepush` 仍可作為選用的手動檢查。
 
 `bun run dev` 繼續作為 `bun run dev:proxy` 的別名。儀表板 dev 伺服器使用 `bun run dev:gui`；
@@ -116,8 +116,10 @@ bun run release:watch               # 觀察最新的 Release workflow run
   失敗模式）。
 - 撰寫真實的描述：說明變更內容與原因的 **Summary**，加上 **Test plan**（或同等實質內容）。空的
   內文、只有佔位符的文字，以及使用跳脫 `\n` 而非真實換行的描述都會無法通過檢查。
-- 若標題或描述提到 `gui`，請在描述中附上 UI 變更的螢幕截圖；`enforce-target` 會在描述編輯時
-  重新執行，直到出現截圖為止。
+- 若 pull request 變更 `gui/` 下的檔案，請在描述中附上 UI 變更的螢幕截圖；`enforce-target` 會在
+  描述編輯時重新執行，直到附上截圖為止。請將圖片拖曳至描述中，不要 commit 到 PR 分支：否則
+  squash merge 會將圖片帶入 `dev`。透過命令列上傳的維護者應使用 `pr-assets` 分支，並以 commit SHA
+  連結圖片。
 - 此 repository 的 workflow 變更使用 **`pull_request_target`**。更新的 enforcement 邏輯只有在
   workflow 提升到 repository 預設分支後才會生效——與 #631 記錄的相同營運注意事項。
 
@@ -135,7 +137,7 @@ bun run release:watch               # 觀察最新的 Release workflow run
   小而專注的 module 位於單一 `index.ts` 之後。
 - **在邊界處理非同步錯誤** —— sidecar 不會把例外拋進請求路徑，而會降級成合適的 marker。
 - **Structure SOT** —— 目前維護者不變數放在 `structure/`；公開使用者流程放在 `docs-site/`；
-  歷史調查/診斷記錄放在 `docs/`。
+  規劃與調查記錄放在 `devlog/`。
 - **保留 export** —— 其他 module 可能依賴它們。
 
 ## 向目錄中新增 provider

@@ -6,8 +6,8 @@ DIST="$ROOT/dist"
 VERSION="$(tr -d '[:space:]' < "$ROOT/pcl_codex_bridge/VERSION")"
 OPENCODEX_SOURCE="$ROOT/vendor/opencodex"
 OPENCODEX_MANIFEST="$ROOT/vendor/opencodex.UPSTREAM.json"
-OPENCODEX_COMMIT="96b1406cb63e429cec8d2e3914af4ba99f2e37b9"
-OPENCODEX_TREE="22639518db6eab88525f7f0932cc4a81a7573b6d"
+OPENCODEX_COMMIT="0cdf0f1f6457ab0378047ef2bbf143cf1263341b"
+OPENCODEX_TREE="58986b4eb5840eb28f3815a35a0b1bcb575fb771"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "Linux bundles must be built on Linux" >&2

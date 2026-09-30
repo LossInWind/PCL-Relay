@@ -132,6 +132,32 @@ Live projection preserves the frozen `RouteSubjectV1` schema. Claim-gated scenar
 
 The two machine-readable Live V1 authority copies are required to be byte-identical. Runtime loading fails closed on byte drift before parsing. Scenario limits use `perArtifactBytes` as the single per-artifact execution-limit key; the artifact policy retains its independent per-artifact policy ceiling.
 
+## CL-07 producer supervision
+
+An isolated fabric producer child is supervised through process exit, not through
+its protocol stream: a parsed `result` line is stored, never settled, so an
+executor cannot end its supervision early and keep mutating its scratch tree.
+Protocol `error` lines, stream failures, and expired budgets latch a kill reason,
+SIGKILL the child, and settle only at the run's decision point — so scratch
+cleanup can never race a live producer. `exit` is the authoritative end of the
+budget window: an already-met deadline still applies, otherwise both budget
+timers are disarmed, and protocol bytes drained afterwards are judged at the
+exit timestamp. A stored result is accepted only on a clean `code 0` exit
+observed at `close`; a nonzero or signaled exit is a harness failure, and a
+latched failure always wins settlement. `close` also waits for the child's
+stdio, so after `exit` a bounded drain (`EXIT_DRAIN_MS`) lets in-flight protocol
+data arrive; if `close` never follows, the run is rejected as an inconclusive
+harness failure — a held-open pipe may mean a descendant escaped supervision or
+simply that drainage stalled, so the result cannot be trusted and its scratch
+cannot be cleaned while reporting success under a possibly-live process.
+Rejections that could not observe `close` — a kill that produced neither `exit`
+nor `close`, and any `exit` whose `close` never arrived — carry the deferred-
+cleanup contract of an unconfirmed kill: the executor retains scratch and emits a fixed
+manual-review warning without writing into producer-controlled paths. Later task creation
+never sweeps these trees. Marker age and inherited-pipe closure are not termination leases.
+After independently confirming all producer/descendant processes stopped, the operator may
+review and remove the exact retained tree; parent exit does not grant automatic cleanup.
+
 ## Scope guard
 
 CL-03 does not expose a management CLI/API or UI. Those surfaces remain CL-04+ work. Production request routing must not synchronously trigger Compatibility Lab probing or rebuild Lab evidence.
@@ -139,3 +165,22 @@ CL-03 does not expose a management CLI/API or UI. Those surfaces remain CL-04+ w
 ## CL-05 GUI read surface
 
 CL-05 adds a read-only Models tab (`#models/compatibility`) that visualizes the compatibility verdict matrix from existing `GET /api/lab/*` management APIs. The legacy `#lab` hash redirects to `#models/compatibility`. The GUI never triggers probe execution, projection rebuilds, or evidence mutation. Verdicts remain per `(subject, evidence layer, suite)`; layers are not collapsed into a universal score.
+
+## Public-evidence mutation, purge and revocation
+
+Public-evidence mutation is serialized across processes by `src/lab/public/mutation-lock.ts`. A live,
+non-reclaimable owner is a fail-fast condition: the caller receives `PublicEvidenceValidationError`
+code `community_cache_busy` without running the protected work, and
+`src/server/management/lab-routes.ts` maps that code to HTTP 503 with `Retry-After: 1`. Other
+public-evidence validation failures stay 400. Rejection leaves the owner's lock bytes and directory
+identity untouched.
+
+Sensitive purge removes a community cache pathname that durable local provenance marks as locally
+originated, even when the cached object is oversized, hardlinked, symlinked or otherwise unreadable
+as a community object. It unlinks the pathname only: it never follows a symlink and never removes a
+peer hardlink. `ENOENT` counts as already absent. Origin markers are cleared only after the deletion
+pass and its directory durability boundary complete.
+
+A same-publisher bundle revocation whose target is absent fails with code `revocation_target` and the
+message `revocation target bundle not found` (`src/lab/public/community.ts`), never a platform
+filesystem `ENOENT`.
